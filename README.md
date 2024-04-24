@@ -1,5 +1,8 @@
 # README
 
+## Citation
+Mikolajewicz, N., Tatari N., Wei J., Savage N., Granda-Farias A., Dimitrov V., Chen D., Zador Z., Dasgupta K., Aguilera-Uribe M., Xiao Y., Yong-Lee S., McKenna D., Venugopal C., Brown K., Han H., Singh S., Moffat J. (2024). Multi-level functional analysis of murine glioma models yields genetic insights into cellular heterogeneity and immune evasion. in review. 
+
 ## Scripts
 
 All the scripts used to generate figures/results in the current manuscript are listed below. For each script, the appropriate single-cell (Seurat) object must be provided as input as specified in the script itself. All data are publicly available or may be obtained from authors upon reasonable request.
