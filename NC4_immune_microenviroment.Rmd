@@ -1,0 +1,1851 @@
+---
+title: "murine microenviroment"
+author: "Nicholas Mikolajewicz"
+date: '2022-07-07'
+output: html_document
+---
+
+
+```{r load libraries, include=FALSE}
+
+# clear global enviroment                          
+rm(list = setdiff(ls(), c("data.path", "user")))
+invisible({gc()})
+
+# initiate timer
+start.time <- proc.time()
+
+# load packages
+packages2load <- c("scMiko", "Seurat", "plyr",  "dplyr", "tidyr", "reshape2", 
+                   "DT", "flexdashboard", "ggpmisc", "future", "foreach", "doParallel",
+                   "AnnotationDbi", "org.Mm.eg.db", "org.Hs.eg.db", "fgsea", "ggplot2", "reactome.db",
+                   "schex", "RColorBrewer", "cowplot")
+
+# load packages
+invisible(lapply(packages2load, library, character.only = TRUE))
+
+```
+
+
+
+```{r load data}
+
+so.query <- readRDS("R726_M02_HH_SET1_allGBM_reboot_rPCA_integration_ANNOTATED_220422.rds")
+```
+
+
+
+```{r prep immune dataset}
+
+cluster.UMAP(so.query, "class")
+cluster.UMAP(so.query, "region_class.clean2") + theme_miko()
+
+
+cluster.UMAP(so.query, "subclass", include.labels = T) + theme_miko()
+
+so.immune <- so.query[ ,so.query@meta.data$class %in% "Immune"]
+so.immune <- so.immune[ ,so.immune@meta.data$region_class.clean2 != "UBQ_OD_Plp1_Cx3cr1_8.68"]
+
+cluster.UMAP(so.immune, "subclass")
+
+```
+
+
+```{r preprocess immune samples}
+
+
+pcaN <- function(object, var.exp = 0.9){
+  df.pca <- propVarPCA(so = object, reduction.name = "pca")
+  df.pca$pc.id[which((df.pca$pc.cum_sum-var.exp)> 0)][1]
+}
+
+so.immune.list <- SplitObject(so.immune, split.by = "Barcode")
+
+# normalize
+so.immune.list <- pbapply::pblapply(X = so.immune.list, FUN = SCTransform, method = "glmGamPoi", verbose = T, vst.flavor = "v2",
+                                    vars.to.regress = "percent.mt", variable.features.rv.th = 1.3)
+
+observed_median_umis <- lapply(X = so.immune.list, 
+                               FUN = function(x){
+                                 y = SCTResults(object = x[["SCT"]], slot = "cell.attributes")
+                                 median( y[, "umi"])
+                               })
+
+var_feat_invivo <- pbapply::pblapply(X = so.immune.list, function(x){
+  x@assays[["SCT"]]@var.features
+})
+
+var_feat_invivo_unique <- unique(unlist(var_feat_invivo))
+
+# ensure same subset of genes used across all datasets
+var_feat_invivo_common <- data.frame(table(unlist(lapply(so.immune.list, function(x){
+  rownames(x@assays[["SCT"]]@SCTModel.list[["model1"]]@feature.attributes)
+}))))
+
+var_feat_invivo_common <- as.character(var_feat_invivo_common$Var1[var_feat_invivo_common$Freq == max(var_feat_invivo_common$Freq)])
+var_feat_invivo_unique <- var_feat_invivo_unique[var_feat_invivo_unique %in% var_feat_invivo_common]
+
+# filter out artefact genes
+af_invivo <- findArtifactGenes(so.immune.list, assay = "SCT", features = var_feat_invivo_unique)
+
+af_invivo$plot # visualize artefacts
+
+var_feat_invivo_unique_no_art <- var_feat_invivo_unique[!(var_feat_invivo_unique %in% af_invivo$artifact.gene)]
+
+# get residuals for common features
+so.immune.list <- pbapply::pblapply(X = so.immune.list, function(x){
+  GetResidual(x, features = var_feat_invivo_unique_no_art)
+})
+
+# merge component datasets
+ so.immune2 <- merge(so.immune.list[[1]], y = so.immune.list[-1]) 
+ so.immune2 <- RunPCA(so.immune2, assay = "SCT", features = var_feat_invivo_unique_no_art)
+ so.immune2 <- RunUMAP(so.immune2, dims = 1:pcaN(so.immune2))
+ 
+ so.immune2 <- runBBKNN(so.immune2, batch = "Barcode")
+ 
+ # cluster
+so.immune2 <- FindNeighbors(object = so.immune2, dims = 1:pcaN(so.immune2))
+so.immune2 <- FindClusters(object = so.immune2, resolution = 1.5, graph.name = "bbknn")
+so.immune2 <- FindClusters(object = so.immune2, resolution = 2)
+
+cluster.UMAP(so.immune2)
+cluster.UMAP(so.immune2, "region_class.clean2", reduction = "umap")
+cluster.UMAP(so.immune2, "Barcode", reduction = "umap")
+cluster.UMAP(so.immune2, reduction = "b")
+
+so.immune2 <- miko_integrate(so.immune2, use.existing.sct = F, split.prenorm = T)
+
+so.immune2@meta.data$model <- NA
+so.immune2@meta.data$model[grepl("PBS", so.immune2@meta.data$Barcode)] <- "Sham"
+so.immune2@meta.data$model[grepl("CT2A", so.immune2@meta.data$Barcode)] <- "CT2A"
+so.immune2@meta.data$model[grepl("GL261", so.immune2@meta.data$Barcode)] <- "GL261"
+
+```
+
+```{r Ochocka dataset}
+
+do.immune_ochocka <-  F
+
+if (do.immune_ochocka){
+
+load(paste0(data.path, "Preprocessed_Datasets/R643_M01_NM2_Ochocka2021_murineGBMimmune_210921.Rdata"));
+
+so.ochocka <- so; rm(so)
+
+barcode.list <- list(
+  Microglia = c(0:4, 5:8, 10, 11, 13:16, 20, 21, 23, 29),
+  Monocyte_Macrophage = c(26, 5, 9, 17),
+  BAM = c(12, 19),
+  Tcell = 18,
+  NK = 25,
+  EC = 30, # endothelial
+  Astrocyte = 24,
+  Ependymal = 32,
+  Bcell = 28,
+  DC = 22,
+  pDC = 31,  # plasmacytoid DC
+  Neutrophil = 27, # _DC
+  OD = 33 # oligodendrocyte
+)
+
+ so.ochocka@meta.data$class <- NA
+for (i in 1:length(barcode.list)){
+  so.ochocka@meta.data$class[so.ochocka@meta.data$seurat_clusters %in% barcode.list[[i]]] <- names(barcode.list)[i]
+}
+ 
+ cluster.UMAP(so.ochocka, "seurat_clusters")
+ cluster.UMAP(so.ochocka, "class")
+ 
+ # filter and reprocess ochocka data
+ so.ochocka <- so.ochocka[ ,!(so.ochocka@meta.data$class %in% c("EC", "Astrocyte", "Ependymal", "OD"))]
+ 
+ so.ochocka.list <- SplitObject(so.ochocka, split.by = "dataset")
+ 
+ # normalize
+ so.ochocka.list <- pbapply::pblapply(X = so.ochocka.list, FUN = SCTransform, method = "glmGamPoi", verbose = T, vst.flavor = "v2",
+                                      vars.to.regress = "percent.mt", variable.features.rv.th = 1.3)
+ 
+ var_feat_invivo <- pbapply::pblapply(X = so.ochocka.list, function(x){
+   x@assays[["SCT"]]@var.features
+ })
+ 
+ var_feat_invivo_unique <- unique(unlist(var_feat_invivo))
+ 
+ # ensure same subset of genes used across all datasets
+ var_feat_invivo_common <- data.frame(table(unlist(lapply(so.ochocka.list, function(x){
+   rownames(x@assays[["SCT"]]@SCTModel.list[["model1"]]@feature.attributes)
+ }))))
+ 
+ var_feat_invivo_common <- as.character(var_feat_invivo_common$Var1[var_feat_invivo_common$Freq == max(var_feat_invivo_common$Freq)])
+ var_feat_invivo_unique <- var_feat_invivo_unique[var_feat_invivo_unique %in% var_feat_invivo_common]
+ 
+ # filter out artefact genes
+ af_invivo <- findArtifactGenes(so.ochocka.list, assay = "SCT", features = var_feat_invivo_unique)
+ 
+ af_invivo$plot # visualize artefacts
+ 
+ var_feat_invivo_unique_no_art <- var_feat_invivo_unique[!(var_feat_invivo_unique %in% af_invivo$artifact.gene)]
+ 
+ # get residuals for common features
+ so.ochocka.list <- pbapply::pblapply(X = so.ochocka.list, function(x){
+   GetResidual(x, features = var_feat_invivo_unique_no_art)
+ })
+ 
+ # merge component datasets
+  so.ochocka2@assays[["SCT"]]@var.features <- var_feat_invivo_unique_no_art
+ so.ochocka2 <- merge(so.ochocka.list[[1]], y = so.ochocka.list[-1]) 
+ so.ochocka2 <- RunPCA(so.ochocka2, assay = "SCT", features = var_feat_invivo_unique_no_art)
+ so.ochocka2 <- RunUMAP(so.ochocka2, dims = 1:pcaN(so.ochocka2))
+ 
+ so.ochocka2 <- runBBKNN(so.ochocka2, batch = "dataset")
+ so.ochocka2 <- FindClusters(so.ochocka2, graph.name = "bbknn")
+ 
+  cluster.UMAP(so.ochocka2, "seurat_clusters")
+ cluster.UMAP(so.ochocka2, "class")
+ cluster.UMAP(so.ochocka2, "class", reduction = "b")
+ cluster.UMAP(so.ochocka2)
+ cluster.UMAP(so.ochocka2,  reduction = "b")
+ 
+ cluster.UMAP(so.ochocka, "class")
+
+}
+```
+
+```{r plot immune markers}
+
+do.marker <- F
+
+if (do.marker){
+  exprUMAP(so.ochocka, "Ms4a1", scale.color = "black") # BCell
+  exprUMAP(so.ochocka, "Tgfbi", scale.color = "black")
+  exprUMAP(so.ochocka, "Mrc1", scale.color = "black")  # BAM
+  exprUMAP(so.ochocka, "Cd14", scale.color = "black")
+  exprUMAP(so.ochocka, "Cd8b1", scale.color = "black")
+  exprUMAP(so.ochocka, "P2ry12", scale.color = "black")
+  exprUMAP(so.ochocka, "Cd8b1", scale.color = "black")
+  exprUMAP(so.ochocka, "Cd2", scale.color = "black")
+  
+  
+  exprUMAP(so.ochocka, "Cd2", scale.color = "black")
+  exprUMAP(so.ochocka, "Ncam1", scale.color = "black")
+  exprUMAP(so.ochocka, "Cldn5", scale.color = "black")
+  exprUMAP(so.ochocka, "Flt1", scale.color = "black") #EC
+  
+  exprUMAP(so.ochocka, "Ttr", scale.color = "black")
+  exprUMAP(so.ochocka, "Clu", scale.color = "black") 
+  exprUMAP(so.ochocka, "Rsph1", scale.color = "black")  # ependymal
+  exprUMAP(so.ochocka, "Riiad1", scale.color = "black")  # ependymal
+  
+  exprUMAP(so.ochocka, "Gfap", scale.color = "black") 
+  exprUMAP(so.ochocka, "Slc1a2", scale.color = "black") 
+  exprUMAP(so.ochocka, "S100b", scale.color = "black") 
+  exprUMAP(so.ochocka, "S100a9", scale.color = "black") 
+  
+  
+  exprUMAP(so.ochocka, "Cd3d", scale.color = "black")  # T cell
+  exprUMAP(so.ochocka, "S100a9", scale.color = "black") 
+  exprUMAP(so.ochocka, "Klra4", scale.color = "black") # NK cells
+  
+  
+  
+  exprUMAP(so.ochocka, "Klk1", scale.color = "black")  
+  exprUMAP(so.ochocka, "Ly6d", scale.color = "black")   
+  exprUMAP(so.ochocka, "Ctrc", scale.color = "black") 
+  exprUMAP(so.ochocka, "Strip2", scale.color = "black")  # DC
+  exprUMAP(so.ochocka, "Mreg", scale.color = "black")  # DC
+  
+  exprUMAP(so.ochocka2, "Bmp2k", scale.color = "black")  # DC
+
+}
+
+```
+
+
+```{r label transfer, fig.width=12, fig.height=4}
+
+if (do.immune_ochocka){
+
+transfer.anchors.immune <- FindTransferAnchors(reference = so.ochocka2, 
+                                               query = so.immune2, 
+                                               normalization.method = "SCT",
+                                               reference.reduction = "pca", 
+                                               recompute.residuals = F,
+                                               k.anchor = 5,
+                                               n.trees = 100,
+                                               npcs = 40
+)
+
+immune.transfer <- TransferData(
+  anchorset = transfer.anchors.immune,
+  refdata = list(class = "class"),
+  reference = so.ochocka2,
+  query = so.immune2,
+  weight.reduction = "pcaproject"
+)
+
+# consolidate results
+df.immune.transfer <- as.data.frame(t(immune.transfer@assays[["prediction.score.class"]]@data))
+
+df.umap.immune <- getUMAP(so.immune2)[["df.umap"]] #, umap.key = "b"
+df.umap.immune <- bind_cols(df.umap.immune, df.immune.transfer)
+
+uclass <- unique(colnames(df.immune.transfer))
+
+plt.immune.score <- list()
+plt.size <- 1
+df.umap.immune.cluster <- NULL
+for (i in 1:length(uclass)){
+  
+  df.umap.immune$z <- df.umap.immune[ ,uclass[i]]
+  plt.immune.score[[uclass[i]]] <-
+    df.umap.immune %>% 
+    dplyr::arrange(z) %>%
+    ggplot(aes(x = x, y = y, color = z)) + 
+    geom_point(size = plt.size) + 
+      scale_color_miko(mid = "grey95", high = "black", limits = c(0,1)) + 
+    labs(title = uclass[i]) + 
+    facet_wrap(~model) + 
+    theme_miko(legend = T)
+  
+  
+  df.umap.immune.sum <- df.umap.immune %>% 
+    dplyr::group_by(seurat_clusters) %>%
+    dplyr::summarize(
+      score.mean = mean(z, na.rm = T)
+    )
+  df.umap.immune.sum$class <- uclass[i]
+  
+  df.umap.immune.cluster <- bind_rows(df.umap.immune.cluster, df.umap.immune.sum)
+}
+
+plt.immune.score
+
+}
+
+```
+
+
+```{r filter immune step 2}
+
+# filter out contaminating neuron/glioma cells
+so.immune3 <- so.immune2[ ,!(so.immune2@meta.data$seurat_clusters %in% c(10, 13))]
+so.immune3 <- RunPCA(so.immune3, assay = "integrated")
+so.immune3 <- RunUMAP(so.immune3, dims = 1:pcaN(so.immune3))
+
+so.immune2 <- so.immune3
+cluster.UMAP(so.immune2)
+
+```
+
+```{r visualize immune markers}
+
+df.deg <- getDEG(so.immune2, assay = "SCT", return.all = T)
+
+so.immune2@active.assay <- "SCT"
+exprUMAP(so.immune2, "P2ry12") + scale_color_miko(mid = "grey95", high = "black")
+exprUMAP(so.immune2, "Tgfbi") + scale_color_miko(mid = "grey95", high = "black")
+exprUMAP(so.immune2, "Mrc1") + scale_color_miko(mid = "grey95", high = "black") # BAM
+exprUMAP(so.immune2, "Cd14") + scale_color_miko(mid = "grey95", high = "black")
+exprUMAP(so.immune2, "Cd8b1") + scale_color_miko(mid = "grey95", high = "black") # t cell
+ exprUMAP(so.immune2, "Ncam1") + scale_color_miko(mid = "grey95", high = "black")
+ exprUMAP(so.immune2, "S100a9") + scale_color_miko(mid = "grey95", high = "black") # neutrophil
+   exprUMAP(so.immune2, "Strip2") + scale_color_miko(mid = "grey95", high = "black")  # DC
+  exprUMAP(so.immune2, "Mreg") + scale_color_miko(mid = "grey95", high = "black")  # DC
+
+  exprUMAP(so.immune2, "Cldn5") + scale_color_miko(mid = "grey95", high = "black")
+  exprUMAP(so.immune2, "Flt1") + scale_color_miko(mid = "grey95", high = "black")
+  exprUMAP(so.immune2, "Negr1") + scale_color_miko(mid = "grey95", high = "black")
+
+   exprUMAP(so.immune2, "Rabgap1l") + scale_color_miko(mid = "grey95", high = "black")
+    exprUMAP(so.immune2, "Scin") + scale_color_miko(mid = "grey95", high = "black")
+     exprUMAP(so.immune2, "Cd163") + scale_color_miko(mid = "grey95", high = "black")
+      exprUMAP(so.immune2, "Serpinb6b") + scale_color_miko(mid = "grey95", high = "black") # DC
+       exprUMAP(so.immune2, "Tmem150c") + scale_color_miko(mid = "grey95", high = "black")
+        exprUMAP(so.immune2, "Tnfrsf4") + scale_color_miko(mid = "grey95", high = "black") # T
+         exprUMAP(so.immune2, "Hoxc6") + scale_color_miko(mid = "grey95", high = "black") # 10
+          exprUMAP(so.immune2, "Nectin1") + scale_color_miko(mid = "grey95", high = "black")
+ exprUMAP(so.immune2, "Nectin1") + scale_color_miko(mid = "grey95", high = "black")
+  exprUMAP(so.immune2, "Ccr9") + scale_color_miko(mid = "grey95", high = "black") # pDC
+   exprUMAP(so.immune2, "Flt3") + scale_color_miko(mid = "grey95", high = "black")
+    exprUMAP(so.immune2, "Csmd3") + scale_color_miko(mid = "grey95", high = "black")
+     exprUMAP(so.immune2, "Cd74") + scale_color_miko(mid = "grey95", high = "black")
+exprUMAP(so.immune2, "Rabgap1l") + scale_color_miko(mid = "grey95", high = "black") # DC
+exprUMAP(so.immune2, "Etv6") + scale_color_miko(mid = "grey95", high = "black") # DC
+exprUMAP(so.immune2, "Stat4") + scale_color_miko(mid = "grey95", high = "black") # DC
+
+  exprUMAP(so.immune2, "Cd74") + scale_color_miko(mid = "grey95", high = "black")
+    exprUMAP(so.immune2, "F13a1") + scale_color_miko(mid = "grey95", high = "black")
+      exprUMAP(so.immune2, "Cd163") + scale_color_miko(mid = "grey95", high = "black")
+        exprUMAP(so.immune2, "Pde4b") + scale_color_miko(mid = "grey95", high = "black")
+          exprUMAP(so.immune2, "Lyn") + scale_color_miko(mid = "grey95", high = "black")
+
+```
+
+```{r annotated immune population}
+
+
+barcode.inhouse.list <- list(
+  Microglia = c(2,3),
+  Macrophage = c(0,1,4,5,8,9,14),
+  DC = c(12,15),
+  TC = c(11, 6,7)
+)
+
+ so.immune2@meta.data$class <- NA
+for (i in 1:length(barcode.inhouse.list)){
+  so.immune2@meta.data$class[so.immune2@meta.data$seurat_clusters %in% barcode.inhouse.list[[i]]] <- names(barcode.inhouse.list)[i]
+}
+ 
+ cluster.UMAP(so.immune2, "seurat_clusters")
+ cluster.UMAP(so.immune2, "class")
+```
+
+
+```{r get human immune datasets}
+
+import.human <- T
+
+if (import.human){
+  
+  # NEFTEL #######################################################################
+  
+  load(paste0("C:/Users/n mikolajewicz/Dropbox/PDF Projects - JM/Data/scRNA-seq/01_sci-RNA-seq3_Hong_Kevin_Jason/NM_HH/Data/", 
+              "Preprocessed_Datasets/R502_M01_NM2_Neftel_2019_10x_lenient_040621.Rdata"))
+  seu <- prepSeurat(so); rm(so)
+  
+  barcode.list <- list(
+    GBM = c(13, 20, 6, 26, 18, 3, 9, 23, 1,2, 5, 28, 21, 3, 9, 23, 0, 11, 19, 24, 25, 30),
+    Immune_Lymphoid = c(22),
+    Immune_Myleoid =  c(12, 7, 10, 17, 4, 16, 14, 29, 8, 15, 27)
+  )
+  
+  seu@meta.data$class <- NA
+  for (i in 1:length(barcode.list)){
+    seu@meta.data$class[seu@meta.data$seurat_clusters %in% barcode.list[[i]]] <- names(barcode.list)[i]
+  }
+  
+  so.neftel.immune<- seu[ ,seu@meta.data$class %in% c("Immune_Lymphoid", "Immune_Myleoid")]
+  cluster.UMAP(so.neftel.immune)
+  
+  # YU ###########################################################################
+  
+  so.yu <- readRDS("seurat_object_Yu2022_processed_080722.rds")
+  
+  cell.list <- list(
+    lymphoid = c(5,15),
+    oligodendrocyte = c(4,9,11),
+    tumor_cilia = 10,
+    myeloid =  c(14, 1, 7, 16),
+    glioma = c(8, 12, 2, 13, 6, 0),
+    unresolved = 3
+  )
+  
+  so.yu <- recodeBarcode(object = so.yu, old.field.name = "seurat_clusters", new.field.name = "celltype",barcode.recode = cell.list, exact.match = T)
+  
+  so.yu.immune <- so.yu[ , so.yu@meta.data$celltype %in% c("lymphoid", "myeloid") ] # & so.yu@meta.data$WHO.Grade %in% c("IV")
+    so.yu.immune <- runBBKNN(so.yu.immune, batch = "sample", do.umap = T)
+  so.yu.immune <- FindClusters(object = so.yu.immune, graph.name = "bbknn")
+  
+  cluster.UMAP(so.yu.immune, reduction = "b")
+  cluster.UMAP(so.yu.immune)
+  
+  exprUMAP(so.yu.immune, "CD68", reduction = "b")
+  exprUMAP(so.yu.immune, "CD74", reduction = "b")
+  exprUMAP(so.yu.immune, "LYN", reduction = "b")
+  exprUMAP(so.yu.immune, "CD3E", reduction = "b")
+  exprUMAP(so.yu.immune, "CTLA4", reduction = "b")
+  exprUMAP(so.yu.immune, "TOX", reduction = "b")# , "CD68"
+  
+  # ABDEL ########################################################################
+   data.direction <- "C:/Users/n mikolajewicz/Dropbox/PDF Projects - JM/Data/scRNA-seq/01_sci-RNA-seq3_Hong_Kevin_Jason/NM_HH/Data/"
+  load(paste0(data.direction, "Preprocessed_Datasets/R733_M02_HH_PR_GBM_Abdelfattah_2022_Scanorama_integrated_380322.Rdata"))
+  so.abdel <- so;
+  rm(so); invisible({gc()})
+  
+  DefaultAssay(so.abdel) <- "integrated"
+  so.abdel <- FindClusters(so.abdel, resolution = 0.1)
+  so.abdel <- FindClusters(so.abdel, resolution = 1.5)
+  DefaultAssay(so.abdel) <- "SCT"
+  
+  # res 0.1
+  abdel.cell.label.low <- list(
+    T_cell = c(3,8),
+    Neuron = 12, 
+    Tumor = c(0,4, 11, 5, 10),
+    OPC = 7,
+    Myeloid = c(1,2,6),
+    Plasma_cell = 13
+  )
+  
+  # res = 1.5
+  abdel.cell.label.high <- list(
+    Dendritic_cell = 36,
+    Neutrophil = 37,
+    NK_cell = 45,
+    Endothelial = 41,
+    Pericyte = c(46, 56),
+    B_cell = 54
+  )
+  
+  so.abdel <- recodeBarcode(object = so.abdel, barcode.recode = abdel.cell.label.low, 
+                            old.field.name = "integrated_snn_res.0.1", new.field.name = "class_1", exact.match = T)
+  so.abdel <- recodeBarcode(object = so.abdel, barcode.recode = abdel.cell.label.high, 
+                            old.field.name = "integrated_snn_res.1.5", new.field.name = "class_2", exact.match = T)
+  
+  so.abdel@meta.data$class <- NA
+
+  so.abdel@meta.data$class <- NA
+  so.abdel@meta.data$class[so.abdel@meta.data$class_1 %in% names(abdel.cell.label.low)] <- so.abdel@meta.data$class_1[so.abdel@meta.data$class_1 %in% names(abdel.cell.label.low)]
+  so.abdel@meta.data$class[so.abdel@meta.data$class_2 %in% names(abdel.cell.label.high)] <- so.abdel@meta.data$class_2[so.abdel@meta.data$class_2 %in% names(abdel.cell.label.high)]
+
+  so.abdel@meta.data$PR <- so.abdel@meta.data$sample
+  so.abdel@meta.data$PR[grepl("rGBM", so.abdel@meta.data$PR)] <- "R"
+  so.abdel@meta.data$PR[grepl("ndGBM", so.abdel@meta.data$PR)] <- "P"  
+
+  so.abdel@meta.data$class_PR <- paste0( so.abdel@meta.data$class, "_", so.abdel@meta.data$PR)
+  
+  cluster.UMAP(so.abdel, "class", reduction ="umap")
+
+  so.abdel.immune <- so.abdel[ , so.abdel@meta.data$class %in% c("Plasma_cell", "B_cell", "T_cell", "NK_cell", "Myeloid", "Neutrophil", "Dendritic_cell") ]
+  rm(so.abdel); gc()
+  so.abdel.immune <- so.abdel.immune[ ,so.abdel.immune@reductions[["umap"]]@cell.embeddings[ ,1] > 0.5]
+    cluster.UMAP(so.abdel.immune, "class", reduction ="umap")
+}
+
+```
+
+
+```{r NMF helper}
+
+  getNMFGenes.dev <- function(feature.loading, norm.cutoff = 0.5, n.cutoff = NA){
+    
+    if (!("matrix" %in% class(feature.loading))) stop("feature.loading input is not a matrix")
+    
+    nmf.kme <- t(feature.loading)
+    nmf.kme <- (apply(nmf.kme, 2, function(x) ((x^2)/sum(x^2))))
+    
+    # get module genes
+    if (!is.na(n.cutoff)){
+      module.genes <-  apply(nmf.kme, 1, function(x) colnames(nmf.kme)[order(-x)][1:n.cutoff])
+      module.genes <-  wideDF2namedList(module.genes)
+    } else {
+      module.genes <-  apply(nmf.kme, 1, function(x) colnames(nmf.kme)[x>norm.cutoff])
+    }
+    
+    module.size <- unlist(lapply(module.genes, length))
+    nmf.module.genes <- module.genes[module.size > 0]
+    
+    return(nmf.module.genes)
+  }
+  
+
+```
+
+```{r run NMF gene program discovery - human immune cells}
+
+redo.hs.nmf <- F
+
+so.immune.neftel <- SplitObject(so.neftel.immune, split.by = "orig.ident")
+so.immune.yu <- SplitObject(so.yu.immune, split.by = "sample")
+so.immune.abdel <- SplitObject(so.abdel.immune, split.by = "sample")
+
+names(so.immune.neftel) <- paste0("NEFTEL_", names(so.immune.neftel))
+names(so.immune.yu) <- paste0("YU_", names(so.immune.yu))
+names(so.immune.abdel) <- paste0("ABDELFATTAH_", names(so.immune.abdel))
+
+so.immune.hs.list <- c(so.immune.neftel, so.immune.yu, so.immune.abdel)
+rm(so.immune.neftel); rm(so.immune.yu); rm(so.immune.abdel); gc()
+
+if (redo.hs.nmf){
+
+library(NNLM)
+  
+so.immune.hs.list <- pbapply::pblapply(so.immune.hs.list, function(x){
+  DefaultAssay(x) = "RNA"
+  tryCatch({
+    SCTransform(x, method = "glmGamPoi", verbose =T, vst.flavor = "v2", conserve.memory = F, assay = "RNA",
+                vars.to.regress = "percent.mt", variable.features.n = 2000, variable.features.rv.th = NULL)
+  }, error = function(e){
+    return(NULL)
+  })
+
+})
+
+for (i in 1:length(so.immune.hs.list)){
+  
+  expr.gene <- getExpressedGenes(so.immune.hs.list[[i]], min.pct = 0.01)
+  expr.gene <- expr.gene[!grepl("mt-|rps|rpl", tolower(expr.gene))]
+  so.immune.hs.list[[i]] <- GetResidual(so.immune.hs.list[[i]], features = expr.gene, assay = "SCT")
+  
+  emat <- so.immune.hs.list[[names(so.immune.hs.list)[i]]]@assays[["SCT"]]@scale.data
+  emat <- emat[rownames(emat) %in% expr.gene, ]
+  so.immune.hs.list[[names(so.immune.hs.list)[i]]]@assays[["SCT"]]@scale.data <-emat
+  so.immune.hs.list[[names(so.immune.hs.list)[i]]]@assays[["SCT"]]@var.features <- rownames(emat)
+  
+}
+
+nmf.hs.res.list <- list()
+
+for (j in 1:length(so.immune.hs.list)){
+  
+  current.sample <- names(so.immune.hs.list)[j]
+  miko_message(current.sample)
+  object <- so.immune.hs.list[[current.sample]]
+  
+  # prep expression matrix 
+  expr.mat <- object@assays[["SCT"]]@scale.data
+  
+  expr.mat[expr.mat < 0] <- 0
+  
+  k.ranks <- 2:12
+  
+  
+  if (length(k.ranks) > 15){
+    cl <- parallel::makeCluster(15)
+  } else {
+    cl <- parallel::makeCluster(length(k.ranks))
+  }
+  
+  doParallel::registerDoParallel(cl)
+  
+  nmf.model.list <- foreach(ind = 1:length(k.ranks), .packages = c("dplyr", "NNLM", "NMF"))  %dopar% {
+    z <- nnmf(expr.mat, k.ranks[ind], verbose = FALSE, check.k = F)
+    return((nmfModel(H=z$H, W = z$W)) )
+  }
+  
+  names(nmf.model.list) <- paste0(current.sample, "_k", k.ranks)
+  
+  parallel::stopCluster(cl)
+  closeAllConnections();
+  gc();
+  
+  
+  nmf.gene.current <- list()
+  for (i in 1:length(nmf.model.list)){
+    nmf.name <- names(nmf.model.list)[i]
+    current.model <-  nmf.model.list[[nmf.name]]
+    current.genes <- getNMFGenes.dev(feature.loading = current.model@W, norm.cutoff = NA, n.cutoff = 50)
+    
+    nmf.name2 <- gsub("_", "", stringr::str_extract(nmf.name, "_k[0-9]*"))  
+    names(current.genes) <- paste0(nmf.name2, "_", seq(1, as.numeric(gsub("k", "", nmf.name2))))
+    nmf.gene.current[[nmf.name]] <- current.genes
+  }
+
+  nmf.gene.flat <- list()
+  
+  for (i in 1:length(nmf.gene.current)){
+    nmf.gene.flat <- c(nmf.gene.flat, nmf.gene.current[[i]])
+  }
+  
+  jmat.multi <- jaccardSimilarityMatrix(nmf.gene.flat)
+
+  nmf.hs.res.list[[current.sample]] <- list(
+    sample = current.sample,
+    nmf =  nmf.model.list,
+    programs = nmf.gene.current,
+    programs.flat = nmf.gene.flat,
+    jmat = jmat.multi
+  )
+
+}
+
+nmf.hs.res.list.all <- nmf.hs.res.list
+
+saveRDS(object = nmf.hs.res.list.all, "NMF_human_immune_220722.rds")
+  
+} else {
+ nmf.hs.res.list.all <-  readRDS("NMF_human_immune_220722.rds")
+}
+
+```
+
+
+
+```{r retrieve robust HUMAN immune gene sets}
+
+nmf.hs.res.list <- nmf.hs.res.list.all
+# get nmf gene sets ############################
+top.n.genes <- 150 # 100
+top.norm.gene <- NA # 0.5
+for (j in 1:length(nmf.hs.res.list)){
+  current.sample <- names(nmf.hs.res.list)[j]
+  nmf.hs.gene.current <- list()
+  nmf.model.list <- nmf.hs.res.list[[current.sample]]$nmf
+  for (i in 1:length(nmf.model.list)){
+    nmf.name <- names(nmf.model.list)[i]
+    current.model <-  nmf.model.list[[nmf.name]]
+    current.genes <- getNMFGenes.dev(feature.loading = current.model@W, norm.cutoff = top.norm.gene, n.cutoff = top.n.genes)
+    nmf.name2 <- gsub("_", "", stringr::str_extract(nmf.name, "_k[0-9]*"))  
+    names(current.genes) <- paste0(nmf.name2, "_", seq(1, as.numeric(gsub("k", "", nmf.name2))))
+    nmf.hs.gene.current[[nmf.name]] <- current.genes
+  }
+  
+  nmf.gene.flat <- list()
+  
+  for (i in 1:length(nmf.hs.gene.current)){
+    nmf.gene.flat <- c(nmf.gene.flat, nmf.hs.gene.current[[i]])
+  }
+  
+  nmf.hs.res.list[[current.sample]]$programs <- nmf.hs.gene.current
+  nmf.hs.res.list[[current.sample]]$programs.flat <- nmf.gene.flat
+  
+}
+
+# ensure within sample robustness ##############################################
+
+intra.threshold <- 0.7 # 0.2
+nmf.hs.gene.all <- list()
+for (i in 1:length(nmf.hs.res.list)){
+  current.sample <- names(nmf.hs.res.list)[i]
+  nmf.gene.flat <- nmf.hs.res.list[[current.sample]]$programs.flat
+  
+  jmat.multi <- jaccardSimilarityMatrix(nmf.gene.flat)
+  jmat.multi.intra <- jmat.multi[apply(jmat.multi, 1, function(x){sum(x  > intra.threshold) > 1}), ]
+  
+  if (nrow(jmat.multi.intra) == 0) next
+  
+  nmf.gene.robust <- nmf.gene.flat[rownames(jmat.multi.intra)]
+  names(nmf.gene.robust) <- paste0(current.sample, "_", names(nmf.gene.robust))
+  nmf.hs.gene.all <- c(nmf.hs.gene.all,nmf.gene.robust)
+}
+
+  jmat.all <- jaccardSimilarityMatrix(nmf.hs.gene.all)
+
+  all.samples <- names(so.immune.hs.list)
+  inter.threshold <- 0.2 # 0.5
+  robust.inter <- apply(jmat.all, 1, function(x){rownames(jmat.all)[which(x  > inter.threshold)]})
+  robust.inter <- lapply(robust.inter, function(x) ulength(stringr::str_remove(stringr::str_remove(x, "_k[0-9]*_[0-9]*"), "-[0-9]*\\]")))
+  robust.programs <- names(robust.inter)[unlist(robust.inter) > 2]
+  
+  
+ 
+  
+  nclust <- 10
+  
+  jmat.robust <- jmat.all[robust.programs, robust.programs]
+  
+  dmat.robust <- as.dist(DiffCorr::cor.dist(jmat.robust, methods = "pearson", absolute = FALSE))
+hmat.robust <- cutree(hclust(dmat.robust), k = nclust)
+
+df.program.ann <- data.frame(
+  program = rownames(jmat.robust),
+  cluster = paste0("nmf_", hmat.robust)
+)
+df.program.ann <- col2rowname(df.program.ann, "program")
+
+  # get final gene programs #####################################################
+uclust <- unique(hmat.robust)
+nmf.hs.robust.list <-  list()
+prev.thresh <- 0.5
+for (i in 1:length(uclust)){
+  
+  current.programs <- rownames(jmat.robust)[hmat.robust %in% uclust[i]]
+  current.programs <- 
+  current.programs <- stringr::str_remove(stringr::str_remove(current.programs, "_k[0-9]*_[0-9]*"), "-[0-9]*\\]")
+  n.u.set <- ulength(stringr::str_remove(current.programs, "_k[0-9]*_[0-9]*"))
+  if (n.u.set == 1){
+    miko_message(uclust[i])
+    next
+  }
+  program.name <- paste0("G",  i)
+  nmf.hs.robust.list[[program.name]] <- nmf.hs.gene.all[rownames(jmat.robust)[hmat.robust %in% uclust[i]]]
+  n.programs <- length(nmf.hs.robust.list[[program.name]])
+  df.tally <- data.frame(table(unlist(nmf.hs.robust.list[[program.name]])))
+  df.tally$prop <- df.tally$Freq/n.programs
+  nmf.hs.robust.list[[program.name]] <- as.character(df.tally$Var1[df.tally$prop > prev.thresh]) # vs. >=
+}
+
+do.hg <- F
+if (do.hg){
+  gu <- rownames(so.abdel.immune)
+  hg.hs.nmf <- runHG(gene.list = nmf.hs.robust.list, gene.universe = gu, species = "Hs" )
+  hg.hs.nmf.sum <- summarizeHG(hg.hs.nmf, show.n = 10)
+  
+  df.hs.hg.bader <- hg.hs.nmf.sum$results
+  
+  hg.hs.nmf.sum$plots
+}
+
+
+```
+
+```{r visualize human immune programs, fig.width=8, fig.height=7 }
+plt.hs.nmf.hm  <- miko_heatmap(jmat.robust, 
+                        cutree_col = nclust, 
+                        cutree_row = nclust, 
+                        clustering_distance_rows = "correlation",
+                        clustering_distance_cols = "correlation",
+                        show_colnames = F,
+                        show_rownames = T,
+                        border_color = NA, annotation_row = df.program.ann,  annotation_col = df.program.ann,
+                        fontsize  = 1)
+plt.hs.nmf.hm
+
+# savePDF("hs_immune_NMF_jaccard_similarity_040822.pdf", plt.hs.nmf.hm, fig.width=15, fig.height=15)
+```
+
+
+```{r NMF gene program discovery - murine immune cells}
+
+for (i in 1:length(so.immune.list)){
+  object <- so.immune.list[[i]]
+  object <- object[, colnames(object) %in% colnames(so.immune2)]
+  so.immune.list[[i]] <- object
+}
+
+redo.nmf <- F
+
+  if (redo.nmf){
+
+library(NNLM)
+
+for (i in 1:length(so.immune.list)){
+
+  expr.gene <- getExpressedGenes(so.immune.list[[i]], min.pct = 0.005)
+  expr.gene <- expr.gene[!grepl("mt-|rps|rpl", tolower(expr.gene))]
+  so.immune.list[[i]] <- GetResidual(so.immune.list[[i]], features = expr.gene, assay = "SCT")
+  
+  emat <- so.immune.list[[names(so.immune.list)[i]]]@assays[["SCT"]]@scale.data
+  emat <- emat[rownames(emat) %in% expr.gene, ]
+  so.immune.list[[names(so.immune.list)[i]]]@assays[["SCT"]]@scale.data <-emat
+  so.immune.list[[names(so.immune.list)[i]]]@assays[["SCT"]]@var.features <- rownames(emat)
+  
+}
+
+nmf.res.list <- list()
+
+for (j in 1:length(so.immune.list)){
+  
+  current.sample <- names(so.immune.list)[j]
+  miko_message(current.sample)
+  object <- so.immune.list[[current.sample]]
+  
+  # prep expression matrix 
+  expr.mat <- object@assays[["SCT"]]@scale.data
+  expr.mat[expr.mat < 0] <- 0
+  
+  k.ranks <- 2:15 # 2:12
+  
+  
+  if (length(k.ranks) > 18){
+    cl <- parallel::makeCluster(18)
+  } else {
+    cl <- parallel::makeCluster(length(k.ranks))
+  }
+  
+  doParallel::registerDoParallel(cl)
+  
+  nmf.model.list <- foreach(ind = 1:length(k.ranks), .packages = c("dplyr", "NNLM", "NMF"))  %dopar% {
+    z <- nnmf(expr.mat, k.ranks[ind], verbose = FALSE, check.k = F)
+    return((nmfModel(H=z$H, W = z$W)) )
+  }
+  
+  names(nmf.model.list) <- paste0(current.sample, "_k", k.ranks)
+
+  parallel::stopCluster(cl)
+  closeAllConnections();
+  gc();
+  
+  
+  nmf.gene.current <- list()
+  for (i in 1:length(nmf.model.list)){
+    nmf.name <- names(nmf.model.list)[i]
+    current.model <-  nmf.model.list[[nmf.name]]
+    current.genes <- getNMFGenes.dev(feature.loading = current.model@W, norm.cutoff = NA, n.cutoff = 50)
+    nmf.name2 <- gsub(paste0(current.sample, "_"), "", nmf.name)
+    names(current.genes) <- paste0(nmf.name2, "_", seq(1, as.numeric(gsub("k", "", nmf.name2))))
+    nmf.gene.current[[nmf.name]] <- current.genes
+  }
+  
+  
+  nmf.gene.flat <- list()
+  
+  for (i in 1:length(nmf.gene.current)){
+    nmf.gene.flat <- c(nmf.gene.flat, nmf.gene.current[[i]])
+  }
+  
+  jmat.multi <- jaccardSimilarityMatrix(nmf.gene.flat)
+
+  nmf.res.list[[current.sample]] <- list(
+    sample = current.sample,
+    nmf =  nmf.model.list,
+    programs = nmf.gene.current,
+    programs.flat = nmf.gene.flat,
+    jmat = jmat.multi
+  )
+
+}
+
+nmf.res.list.all <- nmf.res.list
+# saveRDS(object = nmf.res.list.all, "NMF_immune_v4_020822.rds")
+  
+} else {
+ nmf.res.list.all <-  readRDS("NMF_immune_v4_020822.rds")
+
+}
+
+
+
+
+```
+
+
+```{r retrieve robust immune gene sets}
+
+nmf.res.list <- nmf.res.list.all
+# get nmf gene sets ############################
+
+top.n.genes <- 100 # 100
+top.norm.gene <- NA # 0.5
+for (j in 1:length(nmf.res.list)){
+  current.sample <- names(nmf.res.list)[j]
+  nmf.gene.current <- list()
+  nmf.model.list <- nmf.res.list[[current.sample]]$nmf
+  for (i in 1:length(nmf.model.list)){
+    nmf.name <- names(nmf.model.list)[i]
+    current.model <-  nmf.model.list[[nmf.name]]
+    current.genes <- getNMFGenes.dev(feature.loading = current.model@W, norm.cutoff = top.norm.gene, n.cutoff = top.n.genes)
+    nmf.name2 <- gsub(paste0(current.sample, "_"), "", nmf.name)
+    names(current.genes) <- paste0(nmf.name2, "_", seq(1, as.numeric(gsub("k", "", nmf.name2))))
+    nmf.gene.current[[nmf.name]] <- current.genes
+  }
+  
+  
+  nmf.gene.flat <- list()
+  
+  for (i in 1:length(nmf.gene.current)){
+    nmf.gene.flat <- c(nmf.gene.flat, nmf.gene.current[[i]])
+  }
+  
+  nmf.res.list[[current.sample]]$programs <- nmf.gene.current
+  nmf.res.list[[current.sample]]$programs.flat <- nmf.gene.flat
+  
+}
+
+
+# ensure within sample robustness ##############################################
+
+intra.threshold <- 0.3 # 0.2
+nmf.gene.all <- list()
+for (i in 1:length(nmf.res.list)){
+  current.sample <- names(nmf.res.list)[i]
+  nmf.gene.flat <- nmf.res.list[[current.sample]]$programs.flat
+  
+  jmat.multi <- jaccardSimilarityMatrix(nmf.gene.flat)
+  jmat.multi.intra <- jmat.multi[apply(jmat.multi, 1, function(x){sum(x  > intra.threshold) > 1}), ]
+  
+  if (nrow(jmat.multi.intra) == 0) next
+  
+  nmf.gene.robust <- nmf.gene.flat[rownames(jmat.multi.intra)]
+  names(nmf.gene.robust) <- paste0(current.sample, "_", names(nmf.gene.robust))
+  nmf.gene.all <- c(nmf.gene.all,nmf.gene.robust)
+}
+
+  jmat.all <- jaccardSimilarityMatrix(nmf.gene.all)
+  all.samples <- names(so.immune.list)
+  inter.threshold <- 0.15 # 0.5
+  robust.inter <- apply(jmat.all, 1, function(x){rownames(jmat.all)[which(x  > inter.threshold)]})
+  
+  
+  robust.inter <- lapply(robust.inter, function(x) ulength(stringr::str_remove(x, "_k[0-9]*_[0-9]*")))
+  robust.programs <- names(robust.inter)[unlist(robust.inter) > 1]
+
+  nclust <- 9
+  
+  jmat.robust <- jmat.all[robust.programs, robust.programs]
+  
+  dmat.robust <- as.dist(DiffCorr::cor.dist(jmat.robust, methods = "pearson", absolute = FALSE))
+hmat.robust <- cutree(hclust(dmat.robust), k = nclust)
+
+df.program.ann <- data.frame(
+  program = rownames(jmat.robust),
+  cluster = paste0("nmf_", hmat.robust)
+)
+df.program.ann <- col2rowname(df.program.ann, "program")
+ miko_heatmap(jmat.all, border_color = NA)
+  miko_heatmap(jmat.robust, cutree_col = nclust, cutree_row = nclust, show_colnames  = F,
+               clustering_distance_rows = "correlation",
+               clustering_distance_cols = "correlation",
+               border_color = NA, annotation_row = df.program.ann, annotation_col = df.program.ann)
+
+  
+  # get final gene programs #####################################################
+  
+uclust <- unique(hmat.robust)
+nmf.robust.list <- nmf.robust.final <- list()
+prev.thresh <- 0.25
+for (i in 1:length(uclust)){
+  
+  program.name <- paste0("G",  i)
+  nmf.robust.list[[program.name]] <- nmf.gene.all[rownames(jmat.robust)[hmat.robust %in% uclust[i]]]
+  n.programs <- length(nmf.robust.list[[program.name]])
+  df.tally <- data.frame(table(unlist(nmf.robust.list[[program.name]])))
+  df.tally$prop <- df.tally$Freq/n.programs
+  nmf.robust.final[[program.name]] <- as.character(df.tally$Var1[df.tally$prop > prev.thresh]) # vs. >=
+}
+
+do.hg <- F
+if (do.hg){
+  gu <- rownames(so.query)
+hg.nmf <- runHG(gene.list = nmf.robust.final, gene.universe = gu, species = "Mm" )
+hg.nmf.sum <- summarizeHG(hg.nmf, show.n = 10)
+
+df.hg.bader <- hg.nmf.sum$results
+
+hg.nmf.sum$plots
+}
+
+
+```
+
+```{r enrichment net}
+
+netHG <- function(hg.res, gene.list, species, fdr.filter = 0.1, edge.threshold = 0.25, cex_line = 0.2, pie = "Count", verbose = T){
+  
+  # note, requires that runHG() was run with e2s = T
+  require(clusterProfiler)
+  require(DOSE)
+  require(enrichplot)
+  require(ggnewscale)
+  
+  if (species == "Hs"){
+    odb <- 'org.Hs.eg.db'
+  } else if (species == "Mm"){
+    odb <- 'org.Mm.eg.db'
+  }
+  
+  miko_message("Consolidating results...", verbose = verbose)
+  hs.sum <- summarizeHG(hg.res, do.plot = F)
+  df.hg <- hs.sum[["results"]]
+  
+  ccr <- data.frame(
+    Cluster = df.hg$geneset,
+    ID = df.hg$pathway,
+    Description = df.hg$pathway,
+    GeneRatio = df.hg$overlap,
+    BgRatio = df.hg$overlap,
+    pvalue = df.hg$pval,
+    p.adjust = df.hg$padj,
+    qvalue = df.hg$padj,
+    geneID = gsub(", ", "/", df.hg$overlapGenes),
+    Count = df.hg$overlap
+  )
+  
+  miko_message("Retrieving significant enrichments...", verbose = verbose)
+  ccr <- ccr %>% dplyr::filter(p.adjust < 0.1)
+  
+  
+  
+  miko_message("Generating enrichment profiles...", verbose = verbose)
+  xx <- compareCluster(gene.list, 
+                       fun=  "enrichGO", # customHG
+                       keyType = "SYMBOL",
+                       OrgDb = odb,
+                       universe = unique(unlist(gene.list)),
+                       minGSSize  = 2,
+                       ont = "BP",
+                       pvalueCutoff=fdr.filter
+  )
+  
+  xx@compareClusterResult <- ccr
+  
+  miko_message("Getting similarity matrix...", verbose = verbose)
+  xx2 <- pairwise_termsim(xx)                     
+  # edge.threshold <- 0.25
+  
+  miko_message("Generating network plots...", verbose = verbose)
+  p4.label <- emapplot(xx2, pie=pie, cex_category=3, layout="kk", min_edge = edge.threshold, max.overlaps = Inf, node_label = "category", cex_line = cex_line)
+  p4 <- emapplot(xx2, pie=pie, cex_category=3, layout="kk", min_edge = edge.threshold, max.overlaps = Inf, node_label = "none", cex_line = cex_line)
+  col.pal <- categoricalColPal(labels = names(gene.list))
+  p4 <- p4 + scale_fill_manual(values = col.pal) 
+  p4.label <- p4.label + scale_fill_manual(values = col.pal) 
+  
+  miko_message("Done!", verbose = verbose)
+  
+  return(list(
+    xx = xx,
+    xx2 = xx2,
+    net.plot.nolabel = p4,
+    net.plot.label = p4.label,
+    color.pal = col.pal
+  ))
+  
+}
+
+
+hg.mm.res <- runHG(gene.list =  nmf.robust.final, gene.universe = rownames(so.query), species = "Mm", e2s = T)
+hg.hs.res <- runHG(gene.list =  nmf.hs.robust.list, gene.universe = rownames(so.abdel.immune), species = "Hs", e2s = T)
+
+hg.mm.sum <- as.data.frame(summarizeHG(hg.mm.res, do.plot = F)$results %>% dplyr::filter(padj < 0.2))
+hg.mm.sum$geneset <- gsub("G", "IM_", hg.mm.sum$geneset)
+
+hg.hs.sum <- as.data.frame(summarizeHG(hg.hs.res, do.plot = F)$results %>% dplyr::filter(padj < 0.2))
+hg.hs.sum$geneset <- gsub("G", "IH_", hg.hs.sum$geneset)
+
+# write.table(x = hg.mm.sum, file = "Mm_immune_program_enrichment_040822.csv")
+# write.csv(x = hg.hs.sum, file = "Hs_immune_program_enrichment_040822.csv")
+
+hg.mm.net <- netHG(hg.res = hg.mm.res, gene.list = nmf.robust.final, species = "Mm", fdr.filter = 0.2, 
+                   edge.threshold = 0.25, cex_line = 0.2, pie = "Count", verbose = T)
+
+
+hg.hs.net <- netHG(hg.res = hg.hs.res, gene.list = nmf.hs.robust.list, species = "Hs", fdr.filter = 0.2, 
+                   edge.threshold = 0.25, cex_line = 0.2, pie = "Count", verbose = T)
+
+
+hg.mm.net$net.plot.nolabel
+hg.hs.net$net.plot.nolabel
+
+```
+
+
+
+```{r save NMF component program matrix, fig.width=8, fig.height=7 }
+
+plt.nmf.hm  <- miko_heatmap(jmat.robust, 
+                        cutree_col = nclust, 
+                        cutree_row = nclust, 
+                        clustering_distance_rows = "correlation",
+                        clustering_distance_cols = "correlation",
+                        show_colnames = F,
+                        show_rownames = F,
+                        border_color = NA, annotation_row = df.program.ann,  annotation_col = df.program.ann,
+                        fontsize  = 6)
+plt.nmf.hm
+# savePDF("mm_immune_NMF_jaccard_similarity_040822.pdf", plt.nmf.hm, fig.width=8, fig.height=7)
+```
+
+```{r compare Hs vs Mm immune programs}
+
+nmf.mm.robust.list2 <- nmf.robust.final
+nmf.hs.robust.list2 <- nmf.hs.robust.list
+
+names(nmf.mm.robust.list2) <- paste0("Mm_", names(nmf.mm.robust.list2))
+names(nmf.hs.robust.list2) <- paste0("Hs_", names(nmf.hs.robust.list2))
+
+nmf.all.lists <- c(nmf.mm.robust.list2, nmf.hs.robust.list2)
+nmf.all.lists <- lapply(nmf.all.lists, toupper)
+jmat.all <- jaccardSimilarityMatrix(nmf.all.lists)
+jmat.all <- jmat.all[grepl("Mm", rownames(jmat.all)), grepl("Hs", rownames(jmat.all))]
+
+
+miko_heatmap(jmat.all, scale = "none")
+miko_heatmap(jmat.all, scale = "row")
+miko_heatmap(jmat.all, scale = "column")
+
+```
+
+```{r save gene programs}
+
+
+names(nmf.mm.robust.list2) <- paste0("Mm_", names(nmf.mm.robust.list2))
+names(nmf.hs.robust.list2) <- paste0("Hs_", names(nmf.hs.robust.list2))
+
+
+df.mm.program <- namedList2wideDF(nmf.mm.robust.list2)
+colnames(df.mm.program) <- gsub("Mm_G", "IM_", colnames(df.mm.program))
+df.hs.program <- namedList2wideDF(nmf.hs.robust.list2)
+colnames(df.hs.program) <- gsub("Hs_G", "IH_", colnames(df.hs.program))
+
+# write.csv(x = df.mm.program, "murine_immune_NMF_programs_280528.csv")
+# write.csv(x = df.hs.program, "human_immune_NMF_programs_280528.csv")
+```
+
+
+```{r Hs-Mm cross enrichment}
+
+hg.nmf.comp.m2h <- runHG(gene.list = lapply(nmf.mm.robust.list2, toupper), 
+                gene.universe = toupper(rownames(so.query)), species = "Hs" , 
+                my.pathway = nmf.hs.robust.list2, my.pathway.representation = "SYMBOL")
+
+hg.nmf.comp.m2h.sum <- summarizeHG(hg.nmf.comp.m2h, show.n = 10)
+
+df.hg.comp.m2h <- hg.nmf.comp.m2h.sum$results
+
+df.hg.comp.m2h.wide <- col2rowname(pivot_wider(df.hg.comp.m2h %>% 
+                                                 dplyr::select(c("pathway", "geneset", "padj")), 
+                                               names_from = "pathway", 
+                                               values_from = "padj"), 
+                                   "geneset") 
+df.hg.comp.m2h.wide[df.hg.comp.m2h.wide > 0.05] <-1 
+df.hg.comp.m2h.wide <- -log10(df.hg.comp.m2h.wide)
+df.hg.comp.m2h.wide[df.hg.comp.m2h.wide > 4] <- 4
+
+hg.nmf.comp.h2m <- runHG(gene.list = nmf.hs.robust.list2, 
+                gene.universe = toupper(rownames(so.query)), species = "Hs" , 
+                my.pathway = lapply(nmf.mm.robust.list2, toupper), my.pathway.representation = "SYMBOL")
+
+
+hg.nmf.comp.h2m.sum <- summarizeHG(hg.nmf.comp.h2m, show.n = 10)
+
+df.hg.comp.h2m <- hg.nmf.comp.h2m.sum$results
+
+
+df.hg.comp.h2m.wide <- col2rowname(pivot_wider(df.hg.comp.h2m %>% 
+                                                 dplyr::select(c("pathway", "geneset", "padj")), 
+                                               names_from = "pathway", 
+                                               values_from = "padj"), 
+                                   "geneset") 
+df.hg.comp.h2m.wide[df.hg.comp.h2m.wide > 0.2] <-1
+df.hg.comp.h2m.wide <- -log10(df.hg.comp.h2m.wide)
+df.hg.comp.h2m.wide[df.hg.comp.h2m.wide > 4] <- 4
+
+
+cowplot::plot_grid(
+  miko_heatmap(t(df.hg.comp.h2m.wide)),
+miko_heatmap(df.hg.comp.m2h.wide)
+)
+
+```
+
+
+```{r score abdel immune sets}
+
+ms.immune_abdel <- runMS(so.abdel.immune, genelist = c( lapply(nmf.mm.robust.list2, toupper) , lapply(nmf.hs.robust.list2, toupper)), scale = F)
+
+df.immune.abdel <- ms.immune_abdel$data[ ,names(c( lapply(nmf.mm.robust.list2, toupper) , lapply(nmf.hs.robust.list2, toupper)))]
+df.immune.abdel$class <- so.abdel.immune@meta.data[["class"]]
+
+df.immune.abdel.long <- pivot_longer(df.immune.abdel, names(c( lapply(nmf.mm.robust.list2, toupper) , lapply(nmf.hs.robust.list2, toupper))))
+
+df.immune.abdel.long.sum <- df.immune.abdel.long %>% 
+  dplyr::group_by(class, name) %>%
+  dplyr::summarise(mean.x = mean(value, na.rm = T))
+
+df.immune.abdel.long %>%
+  ggplot(aes(x = name, fill = class, y = value)) + 
+  geom_boxplot(outlier.colour = NA) + 
+  theme_miko(x.axis.rotation = 45, legend = T)
+
+
+df.immune.abdel.mat <- col2rowname(pivot_wider(df.immune.abdel.long.sum,names_from = "name", values_from = "mean.x"), "class") 
+
+miko_heatmap(df.immune.abdel.mat, scale = "column")
+
+miko_heatmap(df.immune.abdel.mat, scale = "row")
+
+```
+
+
+```{r score immune programs and compare between murine and human}
+
+DefaultAssay(so.immune2) <- "SCT"
+ms.immune_all <- runMS(so.immune2, genelist = c(nmf.mm.robust.list2, lapply(nmf.hs.robust.list2, firstup)), scale = F)
+df.immune.score <- ms.immune_all$data[ ,names(c(nmf.mm.robust.list2, lapply(nmf.hs.robust.list2, firstup)))]
+
+c.mat <- cor(df.immune.score)
+
+df.c.mat <- as.data.frame(c.mat)
+df.c.mat <- df.c.mat[grepl("Mm", rownames(c.mat)), grepl("Hs", colnames(c.mat))]
+df.c.mat$pathway <- rownames(df.c.mat)
+df.c.mat.long <- pivot_longer(df.c.mat, cols = rownames(c.mat)[grepl("Hs", rownames(c.mat))])
+colnames(df.c.mat.long) <- c("pathway", "geneset", "r")
+df.c.e.merge <- merge(df.c.mat.long, df.hg.comp.h2m, by = c("pathway", "geneset"))
+mm.order <- paste0("Mm_G", c(6, 1, 9, 4, 5, 8, 3, 7, 2 ))
+hs.order <- paste0("Hs_G", c(1, 3, 8,7, 6, 2, 4,  5, 10,9))
+
+plt.dot.comp <- df.c.e.merge %>%
+  dplyr::mutate(
+    pathway = factor(pathway, levels = mm.order),
+    geneset = factor(geneset, levels = hs.order)
+  ) %>%
+  ggplot(aes(x = geneset, y = pathway, fill = r, color = padj < 0.1, size = -log10(padj))) + 
+  geom_point(pch = 21) + 
+  # scale_color_miko() + 
+  scale_color_manual(values = c("TRUE" = "black", "FALSE" = "grey")) + 
+  scale_fill_miko() + 
+  scale_size(range = c(5,14)) + 
+  theme_miko(legend = T, grid = T) + 
+  labs(title = "Mm vs. Hs Immune Programs")
+
+plt.dot.comp
+
+# savePDF("immune_comp_DOT_040822.pdf", plt.dot.comp, fig.width = 6, fig.height = 4)
+```
+
+
+
+```{r fig.width=12, fig.height=4}
+
+nmf.combined <- c(nmf.mm.robust.list2, lapply(nmf.hs.robust.list2, firstup))
+ms.immune_hs <- ms.immune <- runMS(so.immune2, genelist = nmf.combined, scale = F)
+
+df.ms.immune <-  ms.immune$data
+df.ms.immune <- bind_cols(df.ms.immune[ ,names(nmf.combined)], getUMAP(so.immune2)[["df.umap"]])
+
+pt.size <- 0.2
+plt.ms.umap <- list()
+for (i in 1:length(nmf.combined)){
+  
+  program.name <- names(nmf.combined)[i]
+  df.ms.immune$z <- df.ms.immune[ ,program.name]
+  
+  plt.ms.umap[[program.name]] <- df.ms.immune %>%
+    dplyr::arrange(z) %>%
+    ggplot(aes(x = x, y = y, color = (z))) + 
+    geom_point(size = pt.size) +
+    theme_miko(legend = T) + 
+    viridis::scale_color_viridis(option = "A", direction = -1) + 
+    labs(title = program.name, x = "UMAP 1", y = "UMAP 2") 
+}
+
+df.ms.immune.sub <- df.ms.immune[ c(names(nmf.combined), "class", "seurat_clusters", "model", "Barcode")]
+df.ms.immune.long <- pivot_longer(df.ms.immune.sub, cols = names(nmf.combined))
+
+df.ms.immune.long$class_cluster <- paste0(df.ms.immune.long$class, "_", df.ms.immune.long$seurat_clusters)
+
+df.ms.immune.long.stat <- df.ms.immune.long %>%
+  dplyr::group_by(class_cluster, model, name) %>%
+  dplyr::summarise(score = mean(snip(value), na.rm = T))
+
+df.ms.immune.long.merge.stat <- df.ms.immune.long %>%
+  dplyr::group_by(class_cluster, model, name) %>%
+  dplyr::summarise(score = mean(snip(value), na.rm = T)) %>%
+    dplyr::group_by(class_cluster, name) %>%
+  dplyr::summarise(score = mean(score, na.rm = T))
+
+
+df.ms.immune.wide.ct2a <- col2rowname(pivot_wider(df.ms.immune.long.stat %>% 
+                                                    dplyr::filter(model %in% "CT2A") %>%
+                                                    dplyr::ungroup() %>%
+                                                    dplyr::select(c("name", "score", "class_cluster")) , 
+                                                  names_from = "name", values_from = "score") ,
+                                      "class_cluster")
+
+df.ms.immune.wide.gl261 <- col2rowname(pivot_wider(df.ms.immune.long.stat %>% 
+                                                    dplyr::filter(model %in% "GL261") %>%
+                                                    dplyr::ungroup() %>%
+                                                    dplyr::select(c("name", "score", "class_cluster")) , 
+                                                  names_from = "name", values_from = "score") ,
+                                      "class_cluster")
+
+df.ms.immune.wide.sham <- col2rowname(pivot_wider(df.ms.immune.long.stat %>% 
+                                                    dplyr::filter(model %in% "Sham") %>%
+                                                    dplyr::ungroup() %>%
+                                                    dplyr::select(c("name", "score", "class_cluster")) , 
+                                                  names_from = "name", values_from = "score") ,
+                                      "class_cluster")
+
+
+df.ms.immune.wide.all <- col2rowname(pivot_wider(df.ms.immune.long.merge.stat %>% 
+                                                    # dplyr::filter(model %in% "Sham") %>%
+                                                    dplyr::ungroup() %>%
+                                                    dplyr::select(c("name", "score", "class_cluster")) , 
+                                                  names_from = "name", values_from = "score") ,
+                                      "class_cluster")
+
+cowplot::plot_grid(
+   miko_heatmap(t(df.ms.immune.wide.all ), scale = "row", border_color = NA, cutree_rows = 3, cutree_cols = 6) + labs(title = "CT2A + GL261"),
+  miko_heatmap(t(df.ms.immune.wide.ct2a ), scale = "row", border_color = NA) + labs(title = "CT2A"),
+miko_heatmap(t(df.ms.immune.wide.gl261), scale = "row", border_color = NA) + labs(title = "GL261"),
+nrow = 1
+)
+
+```
+
+```{r immune cell UMAP clean}
+
+df.mm.score <- df.ms.immune[ ,grepl("Mm_", colnames(df.ms.immune))]
+
+df.ms.immune$label <- colnames(df.mm.score)[grepl("Mm_", colnames(df.ms.immune))][apply(df.mm.score[,grepl("Mm_", colnames(df.ms.immune))], 1, which.max)]
+
+df.ms.immune.cluster <- df.ms.immune %>%
+  dplyr::group_by(seurat_clusters, label) %>%
+  dplyr::tally() %>%
+  dplyr::ungroup() %>%
+  dplyr::group_by(seurat_clusters) %>%
+  dplyr::mutate(n.prop = n/sum(n, na.rm =  T))
+
+df.ms.immune.cluster.max <- df.ms.immune.cluster %>% 
+  dplyr::group_by(seurat_clusters) %>% 
+  dplyr::summarise(majory.label = label[which.max(n.prop)])
+
+c2l <- as.character(df.ms.immune.cluster.max$majory.label);
+names(c2l) <- as.character(df.ms.immune.cluster.max$seurat_clusters)
+
+df.ms.immune$clean.label <- c2l[as.character(df.ms.immune$seurat_clusters)]
+df.ms.immune$class_cluster <- paste0(df.ms.immune$class, "_", df.ms.immune$seurat_clusters)
+df.ms.immune$clean.label2 <- paste0(df.ms.immune$class_cluster , "_", df.ms.immune$clean.label)
+
+df.ms.immune.sum <- df.ms.immune %>%
+  dplyr::group_by(label) %>%
+  dplyr::summarise(x.mean = mean(x), y.mean = mean(y))
+df.ms.immune %>%
+  ggplot(aes(x = x, y = y) ) +
+  geom_point(aes( color = seurat_clusters)) 
+
+col.pal.lab <- categoricalColPal(paste0("Mm_G", seq(1, 9)))
+plt.program <- df.ms.immune %>%
+  ggplot(aes(x = x, y = y) ) +
+  geom_point(aes( color = clean.label), size = 1) + 
+  scale_color_manual(values = col.pal.lab) + 
+  theme_miko() + theme_void() + labs(title = NULL) + 
+  theme(legend.position = "bottom")
+
+plt.program
+
+# savePDF("UMAP_immune_colorCluster_020822.pdf", plt.UMAP, fig.width=6, fig.height=6)
+# savePDF("UMAP_immune_colorProgram_040822.pdf", plt.program, fig.width=6.5, fig.height=6)
+# savePDF("UMAP_immune_colorCluster_040822.pdf", plt.UMAP, fig.width=6.5, fig.height=6)
+
+df.ms.immune %>%
+  ggplot(aes(x = x, y = y) ) +
+  geom_point(aes( color = clean.label2)) 
+
+hg.nmf.sum$plots
+
+cluster.UMAP(so.immune2)
+df.ms.immune
+
+miko_heatmap(t(df.ms.immune.wide.all[ ,grepl("Hs_", colnames(df.ms.immune.wide.all))] ), scale = "row", border_color = NA, cutree_rows = 3, cutree_cols = 6) + labs(title = "CT2A + GL261")
+miko_heatmap(t(df.ms.immune.wide.all[ ,grepl("Mm_", colnames(df.ms.immune.wide.all))] ), scale = "row", border_color = NA, cutree_rows = 3, cutree_cols = 6) + labs(title = "CT2A + GL261")
+```
+
+```{r NMF program activity UMAPS, fig.width=3.5, fig.height=30}
+
+plt.ms.umap <- lapply(plt.ms.umap, function(x){x + theme_miko()})
+plt.merge <- cowplot::plot_grid(plotlist = plt.ms.umap[ grepl("Mm", names(plt.ms.umap))], ncol = 1)
+
+# savePDF("immune_NMF_UMAP_040822.pdf", plt.merge, fig.width=3.5, fig.height=30)
+
+```
+
+
+```{r  IMMUNE cell dotplots, fig.width=4, fig.height=11}
+
+so.immune2@meta.data$class_v3 <- df.ms.immune$clean.label
+so.immune2@meta.data$class_v2 <- df.ms.immune$clean.label2
+
+Idents(so.immune2) <- "class_v2"
+DefaultAssay(so.immune2) <- "SCT"
+df.deg.class <- presto::wilcoxauc(X = so.immune2, seurat_assay = "SCT", group_by = "class" )
+df.deg.subclass <- presto::wilcoxauc(X = so.immune2, seurat_assay = "SCT", group_by = "class_v2" )
+df.deg.state <- presto::wilcoxauc(X = so.immune2, seurat_assay = "SCT", group_by = "class_v3" )
+
+df.deg <- bind_rows(df.deg.class, df.deg.subclass, df.deg.state)
+
+df.deg.sig <- df.deg %>% dplyr::filter(padj < 0.05, logFC > 0, auc > 0.5)
+df.deg.sig$pct.dif <- df.deg.sig$pct_in- df.deg.sig$pct_out
+
+u.group <- unique(df.deg.sig$group)
+deg.gene.list <- list()
+for (i in 1:length(u.group)){
+  deg.gene.list[[u.group[i]]] <- df.deg.sig$feature[df.deg.sig$group == u.group[i]]
+}
+
+df.deg.sig.top<- bind_rows(df.deg.sig %>%
+  dplyr::filter(!grepl(toupper("mt-|rpl|rps|Rik|Malat1|Gm"), toupper(feature))) %>%
+  dplyr::group_by(group) %>%
+  dplyr::top_n(5, pct.dif),df.deg.sig %>% dplyr::filter(feature %in% c("Ctla4","P2ry12", "Lrba", "H2-Eb1", "H2-Aa", "H2-Ab")))
+
+dot.deg <- DotPlot(so.immune2, assay = "SCT", features = unique(df.deg.sig.top$feature),  cluster.idents = T) +
+  scale_color_gradient2(high = scales::muted("red"), low = scales::muted("blue")) + 
+  theme_miko(x.axis.rotation = 45, legend = T) + coord_flip() + labs(y = "Cell Type", x = "Genes") +
+ theme(legend.position = "bottom")
+
+dot.deg.dat <- dot.deg$data[ ,c("features.plot", "id", "avg.exp.scaled")]
+dot.deg.dat.wide <- col2rowname(pivot_wider(dot.deg.dat, names_from = "id", values_from = "avg.exp.scaled" ), "features.plot") 
+dmat.clust <- as.dist(DiffCorr::cor.dist(dot.deg.dat.wide, methods = "pearson", absolute = FALSE))
+clust.res <- hclust(dmat.clust)
+dot.deg$data$features.plot <- factor(dot.deg$data$features.plot, levels =clust.res[["labels"]][clust.res[["order"]]])
+
+dot.deg
+# savePDF("immune_dotplot_020822.pdf", dot.deg, fig.width=4, fig.height=11)
+
+```
+
+```{r heatmap of activities}
+
+cell.type.order <- levels(dot.deg$data$id)
+cell.type.order <- stringr::str_remove(cell.type.order, "_Mm_G[0-9]*")
+colpal <- gradient_n_pal(c(scales::muted("blue"), "white", scales::muted("red")), space = "Lab")(seq(0,1, 0.01))
+plt.nmf.activity <- miko_heatmap(t(df.ms.immune.wide.all[cell.type.order ,grepl("Mm_", colnames(df.ms.immune.wide.all))] ), 
+                                 color  = colpal,
+             scale = "row", border_color = NA, cutree_rows = NA, cutree_cols = 6, cluster_cols = F) + labs(title = "CT2A + GL261") + 
+ scale_fill_miko()
+plt.nmf.activity
+
+ # savePDF("immune_heatmap_nmfactivity_040822.pdf", plt.nmf.activity, fig.width=5, fig.height=4)
+
+```
+
+```{r differential immune activity}
+
+df.ms.invivo <- ms.immune$data
+df.ms.invivo$replicate <- so.immune2@meta.data$Barcode
+df.ms.invivo$model <- so.immune2@meta.data$model
+df.ms.invivo$class <- so.immune2@meta.data$class
+
+df.ms.invivo.long <- pivot_longer(df.ms.invivo, cols = paste0("Mm_", names(nmf.robust.final)))
+
+df.ms.invivo.long.sum <- df.ms.invivo.long %>%
+  dplyr::group_by(name, replicate, model, class) %>%
+  dplyr::summarize(
+    x.mean = mean(value),
+    x.median = median(value)
+  )
+
+df.ms.invivo.long.sum.wide <- pivot_wider(df.ms.invivo.long.sum %>%
+                                            dplyr::group_by(name, model, class) %>%
+                                            dplyr::summarize(
+                                              y.mean = mean(x.mean),
+                                              y.sd = sd(x.mean),
+                                              y.se = sd(x.mean)/sqrt(length(x.mean)),
+                                              n = length(x.mean),
+                                              pval = z2p( mean(x.mean)/(sd(x.mean)/sqrt(length(x.mean))))
+                                            ) %>%
+                                            dplyr::group_by(model) %>%
+                                            dplyr::mutate(qval = p.adjust(pval, method = "BH")), 
+                                          names_from = "model" , values_from =c("y.mean", "y.sd","y.se",  "n", "pval", "qval") )
+
+df.ms.invivo.long.sum.wide$delta <- df.ms.invivo.long.sum.wide$y.mean_CT2A - df.ms.invivo.long.sum.wide$y.mean_GL261
+df.ms.invivo.long.sum.wide$se_delta <- sqrt((df.ms.invivo.long.sum.wide$y.se_CT2A^2) + (df.ms.invivo.long.sum.wide$y.se_GL261^2))
+df.ms.invivo.long.sum.wide$z_delta <- df.ms.invivo.long.sum.wide$delta / df.ms.invivo.long.sum.wide$se_delta
+df.ms.invivo.long.sum.wide$p_delta <- z2p(df.ms.invivo.long.sum.wide$z_delta)
+df.ms.invivo.long.sum.wide$q_delta <- p.adjust(df.ms.invivo.long.sum.wide$p_delta , method = "BH")
+df.ms.invivo.long.sum.wide <- df.ms.invivo.long.sum.wide %>% dplyr::arrange(delta)
+gs.order <- unique(as.character(df.ms.invivo.long.sum.wide$name))
+
+df.ms.invivo.long$model <- factor(df.ms.invivo.long$model, levels = c("GL261", "CT2A"))
+df.ms.invivo.long$name <- factor(df.ms.invivo.long$name, levels = gs.order)
+df.ms.invivo.long.sum$name <- factor(df.ms.invivo.long.sum$name, levels = gs.order)
+df.ms.invivo.long.sum.wide$name <- factor(df.ms.invivo.long.sum.wide$name, levels = gs.order)
+
+p1 <- df.ms.invivo.long.sum.wide %>%
+  ggplot(aes(x = name, y = z_delta, fill = delta, color = p_delta < 0.1)) + 
+  
+  theme_miko(legend = T, x.axis.rotation = 45)+ 
+  scale_fill_miko() + 
+  geom_hline(yintercept = 0) + 
+  geom_bar(stat = "identity") + # , color = "black"
+  scale_color_manual(values = c("TRUE" = "black", "FALSE" = "grey")) + 
+  labs(x = NULL) + 
+  facet_wrap(~class)
+p1
+
+p2 <- ggplot() + 
+  geom_violin(data = df.ms.invivo.long, aes(x = name, y = (value), fill = model), scale = "width") + 
+  geom_point(data = df.ms.invivo.long.sum, pch = 21,  aes(x = name, y = x.mean, fill = model)) +  theme_miko()+ 
+  geom_hline(yintercept = 0, linetype = "dashed") + 
+  theme(legend.position = "bottom") +   labs(x = NULL) 
+# 
+plt.activity <- cowplot::plot_grid(p1, p2, ncol = 1)
+plt.activity
+
+```
+
+```{r immune color palette, fig.width=6, fig.height=6}
+
+library(scales)
+getCol <- function(dat, class.levels = NULL){
+  
+  if (!is.null(class.levels)){
+    u.class <- class.levels
+  } else {
+    u.class <- unique(dat$cluster.id)
+  }
+  
+u.class <- u.class[order(u.class, decreasing = T)]
+  
+  cluster.pal <- data.frame(
+    cluster.id = c( u.class),
+    pal =hue_pal()(length(u.class))
+  )
+  
+  dat <- merge(cluster.pal, dat, by = "cluster.id")
+  u.col = unique(dat$pal)
+  dat$seurat_clusters <- as.character(dat$seurat_clusters)
+  
+  c1 <- c()
+  c2 <- c()
+  for (i in 1:length(u.col)){
+    cluster.pal.cur <- dat %>% dplyr::filter(pal %in% u.col[i])
+    cur.colr <- tinter::tinter(u.col[i], steps = nrow(cluster.pal.cur), crop = 1, direction = "tints", adjust = -0.1) #0.15
+    
+    if (nrow(cluster.pal.cur) == length(cur.colr)){
+      c1 <-  c(c1, cur.colr)
+      c2 <-  c(c2, cluster.pal.cur$seurat_clusters)
+    } else {
+      c1 <-  c(c1, cur.colr[(length(cur.colr)-nrow(cluster.pal.cur)):length(cur.colr)])
+      c2 <-  c(c2, cluster.pal.cur$seurat_clusters)    
+    }
+  }
+  col.values <- c1
+  names(col.values) <- c2
+  
+  return(list(pal = col.values, class2col = cluster.pal))
+  
+}
+
+so.immune2@meta.data$class_cluster <- paste0(so.immune2@meta.data$class, "_", so.immune2@meta.data$seurat_clusters)
+df.clust.id <- data.frame(
+  seurat_clusters = so.immune2@meta.data$class_cluster,
+  cluster.id = so.immune2@meta.data$class
+)
+
+df.clust.id <- unique(df.clust.id)
+col.list  <- getCol(dat = df.clust.id, class.levels = unique(so.immune2@meta.data$class))
+col.values <- col.list$pal
+col.pal <- col.list$class2col$pal
+names(col.pal) <- col.list$class2col$cluster.id
+
+plt.UMAP <- cluster.UMAP(so.immune2, "class_cluster", pt.size = 1, include.labels = F) + 
+  scale_color_manual(values = col.values) + 
+  theme_miko() + theme_void() + labs(title = NULL) + 
+  theme(legend.position = "bottom")
+
+plt.UMAP <- cluster.UMAP(so.immune2, "class_cluster", pt.size = 1, include.labels = T) + 
+  scale_color_manual(values = col.values) + 
+  theme_miko() + theme_void() + labs(title = NULL) + 
+  theme(legend.position = "bottom")
+
+# savePDF("UMAP_immune_colorCluster_020822.pdf", plt.UMAP, fig.width=6, fig.height=6)
+```
+
+
+
+```{r differential composition, fig.width=16, fig.height=4}
+
+da.res <- da_Run(
+  object = so.immune2[ ,so.immune2@meta.data$model %in% c("CT2A", "GL261")],
+  condition.group = "model",
+  balance.samples = T,
+  balance.size = NA,
+  reference.group = "GL261",
+  fdr.correction = F
+)
+
+ws.thresh <- 8
+plt.da.umap <- da.res$da.umap
+plt.da.umap[["data"]][["colour_by"]][plt.da.umap[["data"]][["colour_by"]]  > ws.thresh] <- ws.thresh
+plt.da.umap[["data"]][["colour_by"]][plt.da.umap[["data"]][["colour_by"]]  < -ws.thresh] <- -ws.thresh
+plt.da.umap[["data"]] <- plt.da.umap[["data"]] %>% dplyr::arrange(abs(colour_by))
+
+df.da <- da.res[["results"]]
+
+c2c <- so.immune2$class_cluster
+names(c2c) <- as.character(so.immune2$seurat_clusters)
+df.da$cell_type <- c2c[df.da$seurat_clusters]
+
+c2c <- so.immune2$class
+names(c2c) <- as.character(so.immune2$seurat_clusters)
+df.da$cell_type_v2 <- c2c[df.da$seurat_clusters]
+
+plt.da.bar <- df.da %>%
+  ggplot(aes(y =reorder(cell_type, logFC), x = logFC, fill = cell_type)) + 
+  geom_boxplot(outlier.colour = NA) + 
+  theme_miko(x.axis.rotation = 45) + 
+  scale_fill_manual(values = col.values) + 
+  geom_vline(xintercept = 0, linetype = "dashed") + 
+  labs(title = "Differential Abundance", x = "logFC (CT2A - GL261)")
+
+cowplot::plot_grid(plt.da.umap, plt.da.bar, nrow = 1)
+# savePDF("DA_UMAP_plot_bar_260722.pdf", cowplot::plot_grid(plt.da.umap, plt.da.bar, nrow = 1), fig.width = 11, fig.height = 4)
+
+```
+
+```{r highlight populations and pie plots}
+
+so.query@meta.data$model <- NA
+so.query@meta.data$model[grepl("PBS", so.query$Barcode)] <- "Sham"
+so.query@meta.data$model[grepl("CT2A", so.query$Barcode)] <- "CT2A"
+so.query@meta.data$model[grepl("GL261", so.query$Barcode)] <- "GL261"
+so.query@meta.data$is.immune <- "other"
+so.query@meta.data$is.immune[grepl("GBM", so.query$subclass)] <- "GBM"
+so.query@meta.data$is.immune[grepl("IMMUNE", so.query$subclass)] <- "immune"
+so.query@meta.data$is.immune[grepl("GBM", so.query$subclass) & grepl("PBS", so.query$Barcode)] <- "other"
+df.tally.all <- data.frame(table(so.query$is.immune, so.query$Barcode,so.query$model ))
+colnames(df.tally.all) <- c("cell_type", "sample", "model", "n")
+df.tally.all <- df.tally.all %>%
+  dplyr::group_by(model, sample) %>% 
+  dplyr::mutate(n.prop = n/sum(n))
+
+df.state.stat.sum.all <- df.tally.all %>%
+  dplyr::ungroup() %>%
+  dplyr::group_by(model, cell_type) %>%
+  dplyr::summarise(
+    mean.p.norm = mean(n.prop, na.rm = T)
+  ) 
+
+pop.col.pal <- c("other" = "grey", "GBM" = "black", "immune" = "tomato")
+
+g.pop.all <- df.state.stat.sum.all %>% 
+  dplyr::filter(model %in% "GL261") %>%
+  ggplot(aes(x = "", y = mean.p.norm, fill = cell_type)) + 
+  scale_fill_manual(values = pop.col.pal) + 
+  geom_bar(stat = "identity") + coord_polar("y", start=0) +  blank_theme +
+  theme(axis.text.x=element_blank()) +
+  labs(title = "GL261", subtitle = "Immune Abundance") + 
+  theme(legend.position = "none")
+
+c.pop.all <- df.state.stat.sum.all %>% 
+  dplyr::filter(model %in% "CT2A") %>%
+  ggplot(aes(x = "", y = mean.p.norm, fill = cell_type)) + 
+  scale_fill_manual(values = pop.col.pal) + 
+  geom_bar(stat = "identity") + coord_polar("y", start=0) +  blank_theme +
+  theme(axis.text.x=element_blank()) +
+  labs(title = "CT2A", subtitle = "Immune Abundance") + 
+  theme(legend.position = "none")
+
+s.pop.all <- df.state.stat.sum.all %>% 
+  dplyr::filter(model %in% "Sham") %>%
+  ggplot(aes(x = "", y = mean.p.norm, fill = cell_type)) + 
+  scale_fill_manual(values = pop.col.pal) + 
+  geom_bar(stat = "identity") + coord_polar("y", start=0) +  blank_theme +
+  theme(axis.text.x=element_blank()) +
+  labs(title = "Sham", subtitle = "Immune Abundance") + 
+  theme(legend.position = "none")
+
+plt.pie.all <- cowplot::plot_grid(s.pop.all, c.pop.all, g.pop.all, nrow = 1)
+plt.pie.all
+
+so.query@meta.data$is.immune2 <- so.query@meta.data$is.immune
+pop.col.pal <- c("other" = "grey", "GBM" = "grey40", "immune" = "tomato")
+plt.immune.highlight <- cluster.UMAP(so.query, "is.immune2", include.labels = F) + scale_color_manual(values =pop.col.pal )
+plt.immune.highlight
+# savePDF("UMAP_immune_highlight_260722.pdf", plt.immune.highlight, fig.width = 6, fig.height = 5)
+ # savePDF("DA_pie_all_260722.pdf", plt.pie.all)
+
+```
+
+```{r pie charts}
+
+df.tally <- data.frame(table(so.immune2$class_cluster, so.immune2$Barcode,so.immune2$model ))
+colnames(df.tally) <- c("cell_type", "sample", "model", "n")
+df.tally <- df.tally %>%
+  dplyr::group_by(model, sample) %>% 
+  dplyr::mutate(n.prop = n/sum(n))
+
+df.tally %>%
+  ggplot(aes(x = cell_type, y = n.prop, fill = model)) + 
+  geom_boxplot() + 
+  theme_miko(x.axis.rotation = 45)
+
+# pie charts ######################################
+
+blank_theme <- theme_minimal()+
+  theme(
+  axis.title.x = element_blank(),
+  axis.title.y = element_blank(),
+  panel.border = element_blank(),
+  panel.grid=element_blank(),
+  axis.ticks = element_blank(),
+  plot.title=element_text(size=14, face="bold")
+  )
+
+df.state.stat.sum <- df.tally %>%
+  dplyr::ungroup() %>%
+  dplyr::group_by(model, cell_type) %>%
+  dplyr::summarise(
+    mean.p.norm = mean(n.prop, na.rm = T)
+  ) 
+
+df.state.stat.sum.wide <- pivot_wider(df.state.stat.sum , names_from = "model", values_from = "mean.p.norm")
+df.state.stat.sum.wide$delta.ct2a <- df.state.stat.sum.wide$CT2A - df.state.stat.sum.wide$Sham
+df.state.stat.sum.wide$delta.gl261 <- df.state.stat.sum.wide$GL261 - df.state.stat.sum.wide$Sham
+
+df.state.stat.sum.wide %>%
+  ggplot(aes(x = delta.ct2a, y = cell_type)) + 
+  geom_bar(stat = "identity")
+
+df.state.stat.sum.wide %>%
+  ggplot(aes(x = delta.gl261, y = cell_type)) + 
+  geom_bar(stat = "identity")
+
+
+df.state.stat.sum.sum <- df.state.stat.sum %>%
+  dplyr::group_by(model) %>%
+  dplyr::summarize(mean.all.p = sum(mean.p.norm))
+  
+g.pop <- df.state.stat.sum %>% 
+  dplyr::filter(model %in% "GL261") %>%
+  ggplot(aes(x = "", y = mean.p.norm, fill = cell_type)) + 
+  scale_fill_manual(values = col.values) + 
+  geom_bar(stat = "identity") + coord_polar("y", start=0) +  blank_theme +
+  theme(axis.text.x=element_blank()) +
+  labs(title = "GL261", subtitle = "Immune Abundance") + 
+  theme(legend.position = "none")
+
+c.pop <- df.state.stat.sum %>% 
+  dplyr::filter(model %in% "CT2A") %>%
+  ggplot(aes(x = "", y = mean.p.norm, fill = cell_type)) + 
+  scale_fill_manual(values = col.values) + 
+  geom_bar(stat = "identity") + coord_polar("y", start=0) +  blank_theme +
+  theme(axis.text.x=element_blank()) +
+  labs(title = "CT2A", subtitle = "Immune Abundance") + 
+  theme(legend.position = "none")
+
+s.pop <- df.state.stat.sum %>% 
+  dplyr::filter(model %in% "Sham") %>%
+  ggplot(aes(x = "", y = mean.p.norm, fill = cell_type)) + 
+  scale_fill_manual(values = col.values) + 
+  geom_bar(stat = "identity") + coord_polar("y", start=0) +  blank_theme +
+  theme(axis.text.x=element_blank()) +
+  labs(title = "Sham", subtitle = "Immune Abundance") + 
+  theme(legend.position = "none")
+
+plt.pie <- cowplot::plot_grid(s.pop, c.pop, g.pop, nrow = 1)
+plt.pie
+
+# savePDF()
+# savePDF("DA_pie_260722.pdf", plt.pie)
+
+```
+
+```{r row scaled DA tally, fig.width=7, fig.height=6}
+
+df.t2 <- df.state.stat.sum.wide[ ,c( "Sham", "CT2A", "GL261")]
+rownames(df.t2) <- df.state.stat.sum.wide$cell_type
+
+df.t3 <- apply(df.t2, 1, function(x) {x = x/sum(x)})
+
+df.ann <- col2rowname(data.frame(sample = df.state.stat.sum.wide$cell_type, cell_type = df.state.stat.sum.wide$cell_type), "sample")
+ann_colors = list(
+    cell_type = col.values
+)
+
+colpal <- gradient_n_pal(c(scales::muted("blue"), "white", scales::muted("red")), space = "Lab")(seq(0,1, 0.01))
+
+plt.DA_hm <- miko_heatmap(t(df.t3), cluster_cols = F, annotation_row = df.ann, annotation_colors = ann_colors,  color  = colpal)
+
+# savePDF("DA_hm_vsSham_260722.pdf", plt.DA_hm, fig.width=7, fig.height=6)
+
+```
+
+```{r Atg12 mouse survival}
+
+library(survival)
+library(survminer)
+
+df.ct2a.wt <- data.frame(
+  genotype = "WT",
+  survival = c(15, 22, 19)
+)
+
+df.ct2a.atg12 <- data.frame(
+  genotype = "Atg12",
+  survival = c(37, 36, 98, 27)
+)
+
+df.ct2a.survival <- bind_rows(df.ct2a.wt,df.ct2a.atg12 )
+
+plt.box <- df.ct2a.survival %>%
+  dplyr::mutate(genotype = factor(genotype, levels = c("WT", "Atg12"))) %>%
+  ggplot(aes(x = genotype, y = survival)) + 
+  geom_boxplot() + 
+  geom_point() + 
+  theme_miko()
+
+
+df.ct2a.survival$status <- 1
+coxfit2 <- coxph(Surv(survival,status) ~ genotype,data = df.ct2a.survival)
+
+plt.surv <- ggsurvplot(survfit(Surv(survival,status) ~ genotype, data =df.ct2a.survival), 
+                         conf.int = F, pval = T, risk.table = F, surv.median.line = "hv")
+  
+# savePDF("Atg12_CT2A_survival_analysis_090822.pdf",cowplot::plot_grid(plt.surv$plot, plt.box), fig.width = 8, fig.height = 4 )
+
+
+```
+

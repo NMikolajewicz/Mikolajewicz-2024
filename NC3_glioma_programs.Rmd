@@ -1,0 +1,1338 @@
+
+
+```{r load libraries, include=FALSE}
+
+# clear global enviroment                          
+rm(list = setdiff(ls(), c("data.path", "user")))
+invisible({gc()})
+
+# initiate timer
+start.time <- proc.time()
+
+# load packages
+packages2load <- c("scMiko", "Seurat", "plyr",  "dplyr", "tidyr", "reshape2", 
+                   "DT", "flexdashboard", "ggpmisc", "future", "foreach", "doParallel",
+                   "AnnotationDbi", "org.Mm.eg.db", "org.Hs.eg.db", "fgsea", "ggplot2", "reactome.db",
+                   "schex", "RColorBrewer", "cowplot")
+
+# load packages
+invisible(lapply(packages2load, library, character.only = TRUE))
+
+```
+
+```{r parameter specification}
+
+
+# inferState()
+# analysis parameters
+cluster.resolution <- 1
+subset.df <- "no.subset"
+which.species <- "Mm" # Option: Mm or Hs
+
+# downsample factor
+subsample_factor <- 0.75
+
+ct2a.color <- brewer.pal(n = 3, "BrBG")[3]
+gl261.color <- brewer.pal(n = 3, "BrBG")[1]
+
+
+```
+
+
+```{r load datasets}
+
+so.all <- readRDS("SET7_tumorOnly_invitro_invivo_Reboot5_160622.rds")
+so.invitro <- so.all$invitro
+so.invivo <- so.all$invivo
+so.gl261 <- so.all$gl261
+so.ct2a <- so.all$ct2a
+rm(so.all); gc()
+```
+
+```{r in vitro and in vivo UMAPs, fig.width=8, fig.height=4}
+
+plt.invivo <- cluster.UMAP(so.invivo, "model", include.labels = F,pt.size = 0.3) +  # order  = c("invitro", "invivo")
+  scale_color_manual(values = c("CT2A" = ct2a.color, "GL261" = gl261.color)) + 
+  theme_miko() + theme_void() + theme(legend.position = "none")
+plt.invitro <- cluster.UMAP(so.invitro, "model", include.labels = F, pt.size = 1.45)+  #order  = c("invitro", "invivo")
+  scale_color_manual(values = c("CT2A" = ct2a.color, "GL261" = gl261.color)) + 
+  theme_miko() + theme_void() + theme(legend.position = "none")
+
+plt.invitro_invivo <- cowplot::plot_grid(
+  plt.invitro + labs(title = "in vitro"), 
+  plt.invivo + labs(title = "in vivo")
+)
+
+plt.invitro_invivo
+
+# savePDF("UMAP_GL261_CT2A_300622.pdf", plt.invitro_invivo, fig.width=8, fig.height=4)
+
+
+```
+
+
+```{r NMF gene program discovery}
+
+# remotes::install_github('linxihui/NNLM')
+so.split.invitro <- SplitObject(object = so.invitro, split.by = "replicate")
+so.split.invivo <- SplitObject(object = so.invivo, split.by = "replicate")
+names(so.split.invitro) <- paste0(names(so.split.invitro), "_invitro")
+names(so.split.invivo) <- paste0(names(so.split.invivo), "_invivo")
+
+so.split <- c(so.split.invitro, so.split.invivo)
+rm(so.split.invivo); rm(so.split.invitro); gc();
+
+redo.nmf <- F
+  
+  getNMFGenes.dev <- function(feature.loading, norm.cutoff = 0.5, n.cutoff = NA){
+    
+    if (!("matrix" %in% class(feature.loading))) stop("feature.loading input is not a matrix")
+    
+    nmf.kme <- t(feature.loading)
+    nmf.kme <- (apply(nmf.kme, 2, function(x) ((x^2)/sum(x^2))))
+    
+    # get module genes
+    if (!is.na(n.cutoff)){
+      module.genes <-  apply(nmf.kme, 1, function(x) colnames(nmf.kme)[order(-x)][1:n.cutoff])
+      module.genes <-  wideDF2namedList(module.genes)
+    } else {
+      module.genes <-  apply(nmf.kme, 1, function(x) colnames(nmf.kme)[x>norm.cutoff])
+    }
+    
+    module.size <- unlist(lapply(module.genes, length))
+    nmf.module.genes <- module.genes[module.size > 0]
+    
+    return(nmf.module.genes)
+  }
+  
+  
+  if (redo.nmf){
+
+library(NNLM)
+
+so.split <- pbapply::pblapply(so.split, function(x){
+  DefaultAssay(x) = "RNA"
+  tryCatch({
+    SCTransform(x, method = "glmGamPoi", verbose =T, vst.flavor = "v2", conserve.memory = F, assay = "RNA", 
+                vars.to.regress = "percent.mt", variable.features.n = 2000, variable.features.rv.th = NULL)
+  }, error = function(e){
+    return(NULL)
+  })
+  
+})
+
+
+for (i in 1:length(so.split)){
+
+  expr.gene <- getExpressedGenes(so.split[[i]], min.pct = 0.05)
+  expr.gene <- expr.gene[!grepl("mt-|rps|rpl", tolower(expr.gene))]
+  so.split[[i]] <- GetResidual(so.split[[i]], features = expr.gene, assay = "SCT")
+  
+  emat <- so.split[[names(so.split)[i]]]@assays[["SCT"]]@scale.data
+  emat <- emat[rownames(emat) %in% expr.gene, ]
+  so.split[[names(so.split)[i]]]@assays[["SCT"]]@scale.data <-emat
+  so.split[[names(so.split)[i]]]@assays[["SCT"]]@var.features <- rownames(emat)
+  
+}
+
+nmf.res.list <- list()
+
+for (j in 1:length(so.split)){
+  
+  current.sample <- names(so.split)[j]
+  miko_message(current.sample)
+  object <- so.split[[current.sample]]
+  
+  # prep expression matrix 
+  expr.mat <- object@assays[["SCT"]]@scale.data
+  
+  # pos.mat <- expr.mat
+  expr.mat[expr.mat < 0] <- 0
+  
+  k.ranks <- 2:9
+  
+  
+  if (length(k.ranks) > 10){
+    cl <- parallel::makeCluster(10)
+  } else {
+    cl <- parallel::makeCluster(length(k.ranks))
+  }
+  
+  doParallel::registerDoParallel(cl)
+  
+  nmf.model.list <- foreach(ind = 1:length(k.ranks), .packages = c("dplyr", "NNLM", "NMF"))  %dopar% {
+    z <- nnmf(expr.mat, k.ranks[ind], verbose = FALSE, check.k = F)
+    return((nmfModel(H=z$H, W = z$W)) )
+  }
+  
+  names(nmf.model.list) <- paste0(current.sample, "_k", k.ranks)
+  
+  
+  
+  parallel::stopCluster(cl)
+  closeAllConnections();
+  gc();
+  
+  
+  nmf.gene.current <- list()
+  for (i in 1:length(nmf.model.list)){
+    nmf.name <- names(nmf.model.list)[i]
+    current.model <-  nmf.model.list[[nmf.name]]
+    current.genes <- getNMFGenes.dev(feature.loading = current.model@W, norm.cutoff = NA, n.cutoff = 50)
+    nmf.name2 <- gsub(paste0(current.sample, "_"), "", nmf.name)
+    names(current.genes) <- paste0(nmf.name2, "_", seq(1, as.numeric(gsub("k", "", nmf.name2))))
+    nmf.gene.current[[nmf.name]] <- current.genes
+  }
+  
+  
+  nmf.gene.flat <- list()
+  
+  for (i in 1:length(nmf.gene.current)){
+    nmf.gene.flat <- c(nmf.gene.flat, nmf.gene.current[[i]])
+  }
+  
+  jmat.multi <- jaccardSimilarityMatrix(nmf.gene.flat)
+  
+  nmf.res.list[[current.sample]] <- list(
+    sample = current.sample,
+    nmf =  nmf.model.list,
+    programs = nmf.gene.current,
+    programs.flat = nmf.gene.flat,
+    jmat = jmat.multi
+  )
+  
+}
+
+nmf.res.list.all <- nmf.res.list
+
+saveRDS(object = nmf.res.list.all, "NMF_GL261_CT2A_010722.rds")
+  
+} else {
+ nmf.res.list.all <-  readRDS("NMF_GL261_CT2A_010722.rds")
+}
+
+
+
+
+```
+
+
+```{r retrieve robust gene sets}
+
+nmf.res.list <- nmf.res.list.all
+# get nmf gene sets ############################
+
+top.n.genes <- 100 # 100
+top.norm.gene <- NA # 0.5
+for (j in 1:length(nmf.res.list)){
+  current.sample <- names(nmf.res.list)[j]
+  nmf.gene.current <- list()
+  nmf.model.list <- nmf.res.list[[current.sample]]$nmf
+  for (i in 1:length(nmf.model.list)){
+    nmf.name <- names(nmf.model.list)[i]
+    current.model <-  nmf.model.list[[nmf.name]]
+    current.genes <- getNMFGenes.dev(feature.loading = current.model@W, norm.cutoff = top.norm.gene, n.cutoff = top.n.genes)
+    nmf.name2 <- gsub(paste0(current.sample, "_"), "", nmf.name)
+    names(current.genes) <- paste0(nmf.name2, "_", seq(1, as.numeric(gsub("k", "", nmf.name2))))
+    nmf.gene.current[[nmf.name]] <- current.genes
+  }
+  
+  nmf.gene.flat <- list()
+  
+  for (i in 1:length(nmf.gene.current)){
+    nmf.gene.flat <- c(nmf.gene.flat, nmf.gene.current[[i]])
+  }
+  
+  
+  nmf.res.list[[current.sample]]$programs <- nmf.gene.current
+  nmf.res.list[[current.sample]]$programs.flat <- nmf.gene.flat
+  
+}
+
+# ensure within sample robustness ##############################################
+
+intra.threshold <- 0.5 # 0.2
+nmf.gene.all <- list()
+for (i in 1:length(nmf.res.list)){
+  current.sample <- names(nmf.res.list)[i]
+  nmf.gene.flat <- nmf.res.list[[current.sample]]$programs.flat
+  
+  jmat.multi <- jaccardSimilarityMatrix(nmf.gene.flat)
+  jmat.multi.intra <- jmat.multi[apply(jmat.multi, 1, function(x){sum(x  > intra.threshold) > 1}), ]
+  
+  if (nrow(jmat.multi.intra) == 0) next
+  
+  nmf.gene.robust <- nmf.gene.flat[rownames(jmat.multi.intra)]
+  names(nmf.gene.robust) <- paste0(current.sample, "_", names(nmf.gene.robust))
+  nmf.gene.all <- c(nmf.gene.all,nmf.gene.robust)
+  plt.hm <- miko_heatmap(jmat.multi.intra, border_color = NA) + labs(title = current.sample)
+  # print(plt.hm)
+}
+
+  jmat.all <- jaccardSimilarityMatrix(nmf.gene.all)
+  # miko_heatmap(jmat.all)
+  
+  all.samples <- names(so.split)
+  inter.threshold <- 0.3 # 0.5
+  robust.inter <- apply(jmat.all, 1, function(x){rownames(jmat.all)[which(x  > inter.threshold)]})
+  
+  robust.inter <- lapply(robust.inter, function(x) ulength(stringr::str_remove(x, "_k[0-9]*_[0-9]*")))
+  robust.programs <- names(robust.inter)[unlist(robust.inter) > 1]
+  
+  nclust <- 8
+  
+  jmat.robust <- jmat.all[robust.programs, robust.programs]
+  
+  dmat.robust <- as.dist(DiffCorr::cor.dist(jmat.robust, methods = "pearson", absolute = FALSE))
+hmat.robust <- cutree(hclust(dmat.robust), k = nclust)
+
+df.program.ann <- data.frame(
+  program = rownames(jmat.robust),
+  cluster = paste0("nmf_", hmat.robust)
+)
+df.program.ann <- col2rowname(df.program.ann, "program")
+ miko_heatmap(jmat.all, border_color = NA)
+  miko_heatmap(jmat.robust, cutree_col = nclust, cutree_row = nclust, show_colnames  = F,
+               clustering_distance_rows = "correlation",
+               clustering_distance_cols = "correlation",
+               border_color = NA, annotation_row = df.program.ann, annotation_col = df.program.ann)
+
+  
+  # get final gene programs #####################################################
+  
+uclust <- unique(hmat.robust)
+nmf.robust.list <- nmf.robust.final <- list()
+prev.thresh <- 0.5
+for (i in 1:length(uclust)){
+  
+  program.name <- paste0("G",  i)
+  nmf.robust.list[[program.name]] <- nmf.gene.all[rownames(jmat.robust)[hmat.robust %in% uclust[i]]]
+  n.programs <- length(nmf.robust.list[[program.name]])
+  df.tally <- data.frame(table(unlist(nmf.robust.list[[program.name]])))
+  df.tally$prop <- df.tally$Freq/n.programs
+  nmf.robust.final[[program.name]] <- as.character(df.tally$Var1[df.tally$prop >= prev.thresh])
+}
+
+
+do.hg <- F
+if (do.hg){
+  gu <- unique(c(rownames(so.invitro), rownames(so.invivo)))
+hg.nmf <- runHG(gene.list = nmf.robust.final, gene.universe = gu, species = "Mm" )
+hg.nmf.sum <- summarizeHG(hg.nmf)
+
+df.hg.bader <- hg.nmf.sum$results
+
+hg.nmf.sum$plots
+}
+
+
+```
+
+```{r NMF heatmap of component programs, fig.width=8, fig.height=7 }
+
+plt.nmf.hm  <- miko_heatmap(jmat.robust, 
+                        cutree_col = nclust, 
+                        cutree_row = nclust, 
+                        clustering_distance_rows = "correlation",
+                        clustering_distance_cols = "correlation",
+                        show_colnames = F,
+                        show_rownames = F,
+                        border_color = NA, annotation_row = df.program.ann, annotation_col = df.program.ann,
+                        fontsize  = 7)
+plt.nmf.hm
+
+
+# savePDF("NMF_jaccard_similarity_010722.pdf", plt.nmf.hm, fig.width=8, fig.height=7)
+```
+
+
+
+```{r functional annotatio of NMF modules, fig.width=12, fig.height=16}
+
+miko_message("Preparing signature gene sets for scoring...")
+data(geneSets)
+
+cancer.df <- geneSets[["CancerSEA_Hs"]]
+cancer.list <- wideDF2namedList(cancer.df)
+names(cancer.list) <- paste0(names(cancer.list), "_CancerSEA")
+
+verhaak.df <- geneSets[["Verhaak_CancerCell_2010"]]
+verhaak.list <- wideDF2namedList(verhaak.df)
+names(verhaak.list) <- paste0(names(verhaak.list), "_Verhaak")
+
+richards.df <- geneSets[["Richards_NatureCancer_2021_sc"]]
+richards.list <- wideDF2namedList(richards.df)
+names(richards.list) <- paste0(names(richards.list), "_Richards")
+
+neftel.df <- geneSets[["GBM_Hs_Neftel2019"]]
+neftel.list <- wideDF2namedList(neftel.df)
+neftel.list <- neftel.list[!grepl("G", names(neftel.list))]
+names(neftel.list) <- paste0(names(neftel.list), "_Neftel")
+
+gsc.df <- geneSets[["GSC_Catalog"]]
+gsc.list <- wideDF2namedList(gsc.df)
+names(gsc.list) <- paste0(names(gsc.list), "_GS")
+
+gavish.df <- geneSets[["Gavish2022_Tumor_Hallmarks"]]
+gavish.list <- wideDF2namedList(gavish.df)
+names(gavish.list) <- paste0(names(gavish.list), "_Gavish")
+
+hallmark.df <- geneSets[["HALLMARK"]]
+hallmark.list <- wideDF2namedList(hallmark.df)
+names(hallmark.list) <- paste0(names(hallmark.list), "_HALLMARK")
+
+ivy.df <- geneSets[["Puchalski2018_IVY_GBM"]]
+ivy.list <- wideDF2namedList(ivy.df)
+names(ivy.list) <- paste0(names(ivy.list), "_IVY")
+
+
+miko_message("Convert to mouse symbols...")
+verhaak.list <- lapply(verhaak.list, firstup)
+gsc.list <- lapply(gsc.list, firstup)
+neftel.list <- lapply(neftel.list, firstup)
+cancer.list <- lapply(cancer.list, firstup)
+gsc.list <- lapply(gsc.list, firstup)
+gavish.list <- lapply(gavish.list, firstup)
+hallmark.list <- lapply(hallmark.list, firstup)
+ivy.list <- lapply(ivy.list, firstup)
+master.set <- c(neftel.list, richards.list, cancer.list, verhaak.list, gavish.list, hallmark.list, ivy.list) #  gsc.list, 
+
+nmf.gene.final <- nmf.robust.final
+
+gu <- unique(c(unlist(nmf.gene.final), unlist(master.set)))
+
+# use only significant pathways
+hg.nmf <- runHG(gene.list = nmf.gene.final, my.pathway = master.set, gene.universe = gu, my.pathway.representation = "SYMBOL", species = "Mm")
+
+hg.nmf.sum <- summarizeHG(hg.nmf)
+df.hg <- hg.nmf.sum$results
+
+
+```
+
+```{r Annotate NMF programs, fig.width=7.5, fig.height=7}
+
+# VERSION 2 (BEST) ###################################################################
+# 1) HG enrichment of nmf pathways (genes acquired from l2norm loadings > 0.9)
+# 2) filter: padj < 0.05) (significance), all none sig truncated at p = 1 (contrast), omitted if sig in 2 or less replicates (robustness)
+
+list.path.p <- (lapply(hg.nmf, function(x) data.frame(path = x[["pathway"]],
+                                                  padj = x[["padj"]])))
+
+for (i in 1:length(list.path.p)){
+  list.path.p[[i]]$nmf = names(list.path.p)[i]
+}
+
+pval.thresh <- 0.05
+df.path.p <- bind_rows(list.path.p)
+df.path.p <- col2rowname(pivot_wider(df.path.p, names_from = "nmf", values_from = "padj"), "path")
+df.path.p.sig <- df.path.p[apply(df.path.p, 1, function(x) any(x <= pval.thresh)) , ]
+
+rownames(df.path.p.sig) <- gsub("HALLMARK_", "", rownames(df.path.p.sig)) 
+
+pmat.ann.log <- -log10(df.path.p.sig)
+
+wthresh <- 5
+pmat.ann.log[pmat.ann.log > wthresh] <- wthresh
+
+df.row.ann <- data.frame(pathway = rownames(pmat.ann.log))
+df.row.ann$annotation <- "other"
+df.row.ann$annotation[grepl("Proliferation|MITOTIC|G2M|CellCycle|E2F", df.row.ann$pathway)] <- "CellCycle"
+df.row.ann$annotation[grepl("MYC", df.row.ann$pathway)] <- "MYC"
+df.row.ann$annotation[grepl("APOPTOSIS|Stress", df.row.ann$pathway)] <- "Stress" # DN|MTORC|UNFOLDED|Stress|Unfolder|Maturation
+df.row.ann$annotation[grepl("Interferon|INTERFERON|TNFA|INFLAMMATORY|STAT|ALLOGRAFT|COMPLEMENT", df.row.ann$pathway)] <- "Inflammation"
+df.row.ann$annotation[grepl("EMT|MES|TGF|Invasion|JUNCTION", df.row.ann$pathway)] <- "Mesenchymal"
+df.row.ann$annotation[grepl("ANGIOGENESIS|Angiogenesis", df.row.ann$pathway)] <- "Angiogenic"
+df.row.ann$annotation[grepl("OPC|Oligo|Proneural|AC_", df.row.ann$pathway)] <- "Developmental"
+df.row.ann$annotation[grepl("Hypoxia|Glycolysis|HYPOXIA|MES2", df.row.ann$pathway)] <- "Hypoxia"
+df.row.ann$annotation[grepl("Glycolysis|GLYCOLYSIS|MTORC", df.row.ann$pathway)] <- "Metabolic"
+df.row.ann <- col2rowname(df.row.ann, "pathway")
+
+col.pal <- categoricalColPal(unique(df.row.ann$annotation))
+col.pal["other"] <- "grey"
+col.list <- list(
+  annotation = col.pal
+)
+
+ pmat.ann.log.final <- pmat.ann.log
+set.order <- c("G8", "G2",  "G4","G5",  "G7", "G6", "G1", "G3")
+plt.nmf.final <- miko_heatmap(pmat.ann.log.final[ ,set.order],
+             scale = "none", 
+             annotation_colors  = col.list,
+             fontsize = 7,
+             cluster_cols = F,
+             annotation_col  = NA, 
+                                         clustering_distance_rows = "manhattan",
+             annotation_row = df.row.ann,  cutree_col = NA,  
+             border_color = NA)
+
+plt.nmf.final
+
+df.nmf.final <- namedList2wideDF(nmf.gene.final)
+
+# write.csv(df.nmf.final, "NMF_genes_010722.csv")
+# savePDF("NMF_annotation_010722.pdf", plt.nmf.final, fig.width=7.5, fig.height=7)
+
+```
+
+
+```{r compare GL261 vs CT2A NMF programs, fig.width=8, fig.height=4}
+
+ms.invitro <- runMS(so.invitro, genelist = nmf.gene.final, scale = F)
+ms.invivo <- runMS(so.invivo, genelist = nmf.gene.final, scale = F)
+
+df.ms.invivo <- ms.invivo$data
+df.ms.invivo$replicate <- so.invivo@meta.data$replicate
+df.ms.invivo$model <- so.invivo@meta.data$model
+
+df.ms.invivo.long <- pivot_longer(df.ms.invivo, cols = names(nmf.gene.final))
+
+df.ms.invivo.long.sum <- df.ms.invivo.long %>%
+  dplyr::group_by(name, replicate, model) %>%
+  dplyr::summarize(
+    x.mean = mean(value),
+    x.median = median(value)
+  )
+
+
+df.ms.invivo.long.sum.wide <- pivot_wider(df.ms.invivo.long.sum %>%
+                                            dplyr::group_by(name, model) %>%
+                                            dplyr::summarize(
+                                              y.mean = mean(x.mean),
+                                              y.sd = sd(x.mean),
+                                              y.se = sd(x.mean)/sqrt(length(x.mean)),
+                                              n = length(x.mean),
+                                              pval = z2p( mean(x.mean)/(sd(x.mean)/sqrt(length(x.mean))))
+                                              # pval = t.test(x.mean)$p.value
+                                            ) %>%
+                                            dplyr::group_by(model) %>%
+                                            dplyr::mutate(qval = p.adjust(pval, method = "BH")), 
+                                          names_from = "model" , values_from =c("y.mean", "y.sd","y.se",  "n", "pval", "qval") )
+
+df.ms.invivo.long.sum.wide$delta <- df.ms.invivo.long.sum.wide$y.mean_CT2A - df.ms.invivo.long.sum.wide$y.mean_GL261
+df.ms.invivo.long.sum.wide$se_delta <- sqrt((df.ms.invivo.long.sum.wide$y.se_CT2A^2) + (df.ms.invivo.long.sum.wide$y.se_GL261^2))
+df.ms.invivo.long.sum.wide$z_delta <- df.ms.invivo.long.sum.wide$delta / df.ms.invivo.long.sum.wide$se_delta
+df.ms.invivo.long.sum.wide$p_delta <- z2p(df.ms.invivo.long.sum.wide$z_delta)
+df.ms.invivo.long.sum.wide$q_delta <- p.adjust(df.ms.invivo.long.sum.wide$p_delta , method = "BH")
+df.ms.invivo.long.sum.wide <- df.ms.invivo.long.sum.wide %>% dplyr::arrange(delta)
+gs.order <- as.character(df.ms.invivo.long.sum.wide$name)
+
+df.ms.invivo.long$model <- factor(df.ms.invivo.long$model, levels = c("GL261", "CT2A"))
+df.ms.invivo.long$name <- factor(df.ms.invivo.long$name, levels = gs.order)
+df.ms.invivo.long.sum$name <- factor(df.ms.invivo.long.sum$name, levels = gs.order)
+df.ms.invivo.long.sum.wide$name <- factor(df.ms.invivo.long.sum.wide$name, levels = gs.order)
+
+p1 <- df.ms.invivo.long.sum.wide %>%
+  ggplot(aes(x = name, y = delta, fill = delta)) + 
+  
+  theme_miko()+ 
+  scale_fill_miko(low = gl261.color, high= ct2a.color) + 
+  geom_hline(yintercept = 0) + 
+  geom_bar(stat = "identity", color = "black") + labs(x = NULL)
+
+p2 <- ggplot() + 
+  geom_violin(data = df.ms.invivo.long, aes(x = name, y = (value), fill = model), scale = "width") + 
+  geom_point(data = df.ms.invivo.long.sum, pch = 21,  aes(x = name, y = x.mean, fill = model)) +  theme_miko()+ 
+  geom_hline(yintercept = 0, linetype = "dashed") + 
+  theme(legend.position = "bottom") + 
+  scale_fill_manual(values = c("CT2A" = ct2a.color, "GL261" = gl261.color)) + labs(x = NULL)
+
+plt.activity <- cowplot::plot_grid(p1, p2, ncol = 1)
+
+# savePDF("NMF_activity_GL261_CT2A_040722.pdf", plt.activity, fig.width=8, fig.height=4)
+
+ms.invivo$plot.list$G8 +scale_color_miko(midpoint = 0.1, low = brewer.pal(3, "PuOr")[3], high = brewer.pal(3, "PuOr")[1])
+ms.invivo$plot.list$G8 +scale_color_miko(midpoint = mean(ms.invivo$data$G8), low = brewer.pal(3, "PuOr")[3], high = brewer.pal(3, "PuOr")[1])
+ms.invivo$plot.list$G8 +scale_color_miko(midpoint = median(ms.invivo$data$G8), low = brewer.pal(3, "PuOr")[3], high = brewer.pal(3, "PuOr")[1])
+ms.invivo$plot.list$G7 +scale_color_miko(low = brewer.pal(3, "PuOr")[3], high = brewer.pal(3, "PuOr")[1])
+ms.invivo$plot.list$G5 +scale_color_miko(low = brewer.pal(3, "PuOr")[3], high = brewer.pal(3, "PuOr")[1])
+ms.invivo$plot.list$G3 +scale_color_miko(low = brewer.pal(3, "PuOr")[3], high = brewer.pal(3, "PuOr")[1])
+ms.invivo$plot.list$G8  +scale_color_miko(mid = "grey95")
+ms.invivo$plot.list$G2 +scale_color_miko(low = brewer.pal(3, "PuOr")[3], high = brewer.pal(3, "PuOr")[1])
+ms.invivo$plot.list$G6 +scale_color_miko(low = brewer.pal(3, "PuOr")[3], high = brewer.pal(3, "PuOr")[1])
+
+```
+
+```{r visualize programs on UMAPs, fig.width=17, fig.height=8}
+
+all.plots <- list()
+
+ms.name <- names(nmf.gene.final)
+for (i in 1:length(nmf.gene.final)){
+  df.ms.invivo$z <- df.ms.invivo[ ,ms.name[i]]
+  
+all.plots[[ms.name[i]]] <-  df.ms.invivo %>%
+    dplyr::arrange(z) %>%
+  ggplot(aes(x = x, y = y, color = z)) +
+    geom_point(size = 1) +
+    viridis::scale_color_viridis(option = "A", direction = -1) + 
+    theme_miko() + 
+    labs(color = "z", title = ms.name[i])
+}
+
+plt.invivo <- cowplot::plot_grid(plotlist = all.plots, nrow = 2)
+plt.invivo
+
+# savePDF("NMF_UMAP_activity_040722.pdf", plt.invivo, fig.width=17, fig.height=8)
+```
+
+
+
+```{r explore co-occurence states}
+
+state.list.gl261 <- state.list.ct2a <- state.list.all <- list()
+ms.name <- names(nmf.gene.final)
+
+df.ms.invivo.ct2a <- df.ms.invivo[ so.invivo@meta.data$model %in% c("CT2A") , ]
+df.ms.invivo.gl261 <- df.ms.invivo[ so.invivo@meta.data$model %in% c("GL261") , ]
+
+df.prop.n <- NULL
+for (i in 1:length(nmf.gene.final)){
+  
+  current.ms <- ms.name[i]
+  df.ms.invivo.ct2a$z <- df.ms.invivo.ct2a[ ,ms.name[i]]
+  df.ms.invivo.gl261$z <- df.ms.invivo.gl261[ ,ms.name[i]]
+  df.ms.invivo$z <- df.ms.invivo[ ,ms.name[i]]
+  is.res.all <- inferState(df.ms.invivo$z, k = 2)
+  state.list.all[[current.ms]] <- which(is.res.all$class %in% 1) 
+    state.list.gl261[[current.ms]] <-  which((is.res.all$class %in% 1) &  (so.invivo@meta.data$model %in% c("GL261")))
+  state.list.ct2a[[current.ms]] <-which((is.res.all$class %in% 1) &  (so.invivo@meta.data$model %in% c("CT2A")))
+ gl261.on <-  sum((is.res.all$class %in% 1) &  (so.invivo@meta.data$model %in% c("GL261")))
+  ct2a.on <-  sum((is.res.all$class %in% 1) &  (so.invivo@meta.data$model %in% c("CT2A")))
+  
+  df.prop.n <- bind_rows(
+    df.prop.n,
+    data.frame(
+      program = current.ms,
+      gl261 = gl261.on /length(is.res.gl261$class),
+      ct2a = ct2a.on /length(is.res.ct2a$class)
+    )
+  )
+  
+}
+
+jmat.state.ct2a <- jaccardSimilarityMatrix(state.list.ct2a)
+jmat.state.gl261 <- jaccardSimilarityMatrix(state.list.gl261)
+
+jmat.state.gl261_2 <- jmat.state.gl261
+jmat.state.gl261_2[jmat.state.gl261_2 == 1] <-max(jmat.state.gl261_2[jmat.state.gl261_2 != 1]) 
+
+jmat.state.ct2a_2 <- jmat.state.ct2a
+jmat.state.ct2a[jmat.state.ct2a == 1] <-max(jmat.state.ct2a[jmat.state.ct2a != 1])
+
+miko_heatmap(jmat.state.gl261_2, border_color = NA)
+miko_heatmap(jmat.state.ct2a, border_color = NA)
+
+```
+
+
+```{r differential tumor gene activity}
+
+deg.invivo <- getDEG(so.invivo, group_by = "model", return.all = T, return.list = F)
+deg.invitro <- getDEG(so.invitro, group_by = "model", return.all = T, return.list = F)
+
+deg.invivo <- deg.invivo %>% dplyr::filter(group %in% "CT2A")
+deg.invitro <- deg.invitro %>% dplyr::filter(group %in% "CT2A")
+
+deg.invivo$condition <- "invivo"
+deg.invitro$condition <- "invitro"
+df.all <- bind_rows(deg.invivo, deg.invitro)
+
+deg.all.wide <- pivot_wider(df.all %>% dplyr::select(-c("sensitivity", "specificity", "PPV", "NPV", "ss", "statistic")), 
+                            names_from = "condition", values_from = c("avgExpr", "logFC", "auc", "pval", "padj", "pct_in", "pct_out", "pct.dif"))
+deg.all.wide <- deg.all.wide[complete.cases(deg.all.wide), ]
+
+
+```
+
+
+
+
+```{r subbeam plot, fig.width=8, fig.height=7}
+
+df.all <- deg.all.wide
+df.all <- df.all[complete.cases(df.all), ]
+
+df.all$gene <- df.all$feature
+df.all$normZ.x <- df.all$logFC_invitro
+df.all$normZ.y <- df.all$logFC_invivo
+
+df.all$log.euc.xy <- sqrt((df.all$normZ.x^2) + (df.all$normZ.y^2))
+
+df.all$p.x <- df.all$pval_invitro
+df.all$p.y <- df.all$pval_invivo
+
+# define Sectors ###############################################################
+ax.lim <- 50
+# sector 1
+df.q1 <- data.frame(y = seq(0, ax.lim, 0.01))
+df.q1$x1 <- df.q1$y /  tan((22.5+45) / (180/pi))
+df.q1$x2 <- df.q1$y /   tan((22.5+45+45) / (180/pi))
+# sector 2
+df.q2 <- data.frame(x = seq(0, ax.lim, 0.01))
+df.q2$y1 <- df.q2$x *  tan((22.5) / (180/pi))
+df.q2$y2 <- df.q2$x *   tan((22.5+45) / (180/pi))
+# sector 3
+df.q3 <- data.frame(x = seq(0, ax.lim, 0.01))
+df.q3$y1 <- df.q3$x *  tan((22.5) / (180/pi))
+df.q3$y2 <- df.q3$x *   tan((22.5+45+45 + 45) / (180/pi))
+# sector 4
+df.q4 <- data.frame(x = seq(0, ax.lim, 0.01))
+df.q4$y1 <- df.q4$x *  tan((22.5+45+45) / (180/pi))
+df.q4$y2 <- df.q4$x *   tan((22.5+45+45 + 45) / (180/pi))
+# sector 5
+df.q5 <- data.frame(y = seq(-ax.lim,0 , 0.01))
+df.q5$x1 <- df.q5$y /  tan((22.5+45+45) / (180/pi))
+df.q5$x2 <- df.q5$y /   tan((22.5+45) / (180/pi))
+# sector 6
+df.q6 <- data.frame(x = seq(-ax.lim, 0, 0.01))
+df.q6$y1 <- df.q6$x *  tan((22.5) / (180/pi))
+df.q6$y2 <- df.q6$x *   tan((22.5+45) / (180/pi))
+# sector 7
+df.q7 <- data.frame(x = seq(-ax.lim, 0, 0.01))
+df.q7$y1 <- df.q7$x *  tan((22.5) / (180/pi))
+df.q7$y2 <- df.q7$x *   tan((22.5+45+45 + 45) / (180/pi))
+# sector 8
+df.q8 <- data.frame(x = seq(-ax.lim, 0, 0.01))
+df.q8$y1 <- df.q8$x *  tan((22.5+45+45) / (180/pi))
+df.q8$y2 <- df.q8$x *   tan((22.5+45+45 + 45) / (180/pi))
+
+# elliptical threshold ########################################################
+fdr.threshold <- 0.05
+lfc.thresh <- 0
+df.x.min <- df.all %>% filter(p.x < fdr.threshold, normZ.x < -lfc.thresh ) 
+x.lo <- max(df.x.min$g.lfc.sc)
+df.x.max <- df.all %>% filter(p.x < fdr.threshold, normZ.x > lfc.thresh ) 
+x.hi <- min(df.x.max$g.lfc.sc)
+df.y.min <- df.all %>% filter(p.y < fdr.threshold, normZ.y < -lfc.thresh ) 
+y.lo <- max(df.y.min$c.lfc.sc)
+df.y.max <- df.all %>% filter(p.y < fdr.threshold, normZ.y > lfc.thresh  )
+y.hi <- min(df.y.max$c.lfc.sc)
+# # calculate ellipses
+stat.eclip <- stat_ellipse(level =0.999, linetype = 2)
+plotData <- ggplot(df.all, aes(normZ.x, normZ.y)) + geom_point() + stat.eclip
+build <- ggplot_build(plotData)$data
+points <- build[[1]]
+ell <- build[[2]]
+# rescale ellipses
+ell$x.norm <- ell$x
+ell$x.norm[ell$x > 0] <- ell$x.norm[ell$x > 0] / max(ell$x.norm[ell$x > 0])
+ell$x.norm[ell$x > 0] <- ell$x.norm[ell$x > 0] * x.hi
+ell$x.norm[ell$x < 0] <- (ell$x.norm[ell$x < 0] / min(ell$x.norm[ell$x < 0]))
+ell$x.norm[ell$x < 0] <- ell$x.norm[ell$x < 0] * x.lo
+ell$y.norm <- ell$y
+ell$y.norm[ell$y > 0] <- ell$y.norm[ell$y > 0] / max(ell$y.norm[ell$y > 0])
+ell$y.norm[ell$y > 0] <- ell$y.norm[ell$y > 0] * y.hi
+ell$y.norm[ell$y < 0] <- (ell$y.norm[ell$y < 0] / min(ell$y.norm[ell$y < 0]))
+ell$y.norm[ell$y < 0] <- ell$y.norm[ell$y < 0] * y.lo
+
+# helper funtion ###################
+rescaleValues <- function(values, new.min = 0, new.max = 1){
+  # set lower bound to zero
+  old.min <- min(values)
+  if (old.min < 0) {
+    values <- values + abs(old.min)
+  } else if (old.min > 0) {
+    values <- values - abs(old.min)
+  }
+  stopifnot( min(values) == 0)
+  # set upper bound to one
+  old.max <- (max(values))
+  values <- values/old.max
+  stopifnot( max(values) == 1)
+  new.range <- new.max - new.min
+  values <- values * new.range
+  values <- values + new.min
+  stopifnot(min(values) == new.min)
+  stopifnot(max(values) == new.max)
+  return(values)
+}
+
+# generate plot #################################33
+# # plot range
+min.x <- min(df.all$normZ.x) * 1.1
+max.x <- max(df.all$normZ.x) * 1.1
+min.y <- min(df.all$normZ.y) * 1.1
+max.y <- max(df.all$normZ.y) * 1.1
+# 
+# # flag points that are outside of ellipses threshold
+df.inout <- data.frame(df.all$normZ.x,  df.all$normZ.y,
+                       in.ell = as.logical(sp::point.in.polygon(df.all$normZ.x,
+                                                                df.all$normZ.y,
+                                                                ell$x.norm,
+                                                                ell$y.norm)))
+outside <- which(df.inout$in.ell == FALSE)
+df.all$in_ellipsoid <- rep(FALSE, dim(df.all)[1])
+df.all$in_ellipsoid[outside] <- TRUE
+# # get labels
+top.n.labels <- 50
+top.genes <- (df.all %>% top_n(top.n.labels, log.euc.xy))$gene
+df.all$label <- ""
+df.all$label[df.all$gene %in% top.genes] <- df.all$gene[df.all$gene %in% top.genes]
+df.all$label[is.na(df.all$label)] <- ""
+
+
+# specify colors
+x.color <- ct2a.color
+y.color <- gl261.color 
+x.alpha <- 0.2
+y.alpha <-  0.2
+# get italicized labels
+top.n.labels <- 120
+top.genes <- (df.all %>% top_n(top.n.labels, log.euc.xy))$gene
+df.all$label <- ""
+df.all$label[df.all$gene %in% top.genes] <- paste0("italic('", df.all$gene[df.all$gene %in% top.genes], "')")
+df.label <- df.all[!is.na(df.all$label) & df.all$label != "", ]
+# scale points (needs some tinkering to get nice asthetics)
+df.all$log.euc.xy <- sqrt((df.all$normZ.x ^2) + (df.all$normZ.y ^2))
+df.all$log.euc.recale <- df.all$log.euc.xy
+df.all$log.euc.recale[!df.all$in_ellipsoid] <- min(df.all$log.euc.recale[df.all$in_ellipsoid])
+df.all$log.euc.recale <- rescaleValues((df.all$log.euc.recale), 0.0001, 100)
+df.all$log.euc.recale <- df.all$log.euc.recale - 15
+df.all$log.euc.recale[df.all$log.euc.recale < 0] <- 0.0001
+cor.test(df.all$logFC_invitro, df.all$logFC_invivo)
+
+plt.sb <- ggplot( data = df.all ) +
+  geom_ribbon(data = df.q1, aes(y = y, xmin = x1, xmax = x2), alpha = x.alpha, fill = x.color) + 
+  geom_ribbon(data = df.q2, aes(x = x, ymin = y1, ymax = y2), fill =ct2a.color, alpha = 0.5) + 
+  geom_ribbon(data = df.q3, aes(x = x, ymin = y1, ymax = y2), alpha = y.alpha, fill = x.color) +
+  geom_ribbon(data = df.q4, aes(x = x, ymin = y1, ymax = y2), alpha = 1, fill = "white") + 
+  geom_ribbon(data = df.q5, aes(y = y, xmin = x1, xmax = x2), alpha = x.alpha, fill = y.color) + 
+  geom_ribbon(data = df.q6, aes(x = x, ymin = y1, ymax = y2),  fill = gl261.color, alpha = 0.5) + 
+  geom_ribbon(data = df.q7, aes(x = x, ymin = y1, ymax = y2), alpha = y.alpha, fill = y.color) + 
+  geom_ribbon(data = df.q8, aes(x = x, ymin = y1, ymax = y2), alpha = 1, fill = "white") + 
+    geom_hline(yintercept = 0, color = "grey", linetype = "dashed") +
+  geom_vline(xintercept = 0, color = "grey", linetype = "dashed") +
+  geom_abline(slope =1 , color = "grey", linetype = "dashed") +
+  geom_abline(slope = -1, color = "grey", linetype = "dashed") +
+  geom_point( aes(x=normZ.x, y=normZ.y),shape=20,size=0.1,colour="lightgrey" ) +
+    geom_point( data=subset( df.all,in_ellipsoid ),
+              aes(x=normZ.x,y=normZ.y,size=log.euc.recale),pch=21,colour="black",fill="lightgrey" ) + 
+  ggConvexHull::geom_convexhull (data = ell, aes(x = x.norm, y = y.norm), color = "black", alpha = 0, linetype = "dashed") + 
+  ggrepel::geom_text_repel(data = df.label, aes(x = normZ.x, y = normZ.y, label =label), size = 3, parse = TRUE, max.overlaps = Inf) + 
+  labs( title = "Differential Expression", x = "in vitro (CT2A - GL261)",  y = "in vivo (CT2A - GL261)"  ) + 
+  theme(legend.position = "none",
+        panel.grid.major =element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_rect(fill = "#FFFFFF", colour = "black",size = 1, linetype = "solid"),
+        panel.border = element_rect(colour = "black", fill=NA, size=1),
+        axis.text.x = element_text( color="black",size=12,angle=0,hjust=1),
+        axis.text.y = element_text( color="black",size=12),
+        axis.title = element_text( color="black",size=14,face="bold"),
+        plot.title = element_text( size=16, face="bold", hjust=0.5 )) + 
+  coord_cartesian(xlim = c(min.x, max.x), ylim = c(min.y, max.y))
+
+plt.sb
+# savePDF("sunbeam_DEG_CT2A_GL261_300622.pdf", plt.sb, fig.width=8, fig.height=7)
+```
+
+```{r umap Expression plots,   fig.width=11, fig.height=3}
+
+getExpr <- function(object, feature, assay = DefaultAssay(object), slot = "data"){
+  
+  
+  if (slot == "data"){
+    emat <- object@assays[[assay]]@data
+  } else if (slot == "counts"){
+    emat <- object@assays[[assay]]@counts
+  } else if (slot == "scale.data"){
+    emat <- object@assays[[assay]]@scale.data
+  }
+  
+  return(emat[rownames(emat) %in% feature, ])
+
+}
+
+do.snip <- T
+which.gene <- "Stat1"
+
+df.meta.invitro <- getUMAP(so.invitro)[["df.umap"]]
+
+if (do.snip){
+ df.meta.invitro$feature <- (snip(getExpr(so.invitro,which.gene, slot = "data")))
+} else {
+ df.meta.invitro$feature <- ((getExpr(so.invitro,which.gene, slot = "data")))
+}
+
+df.meta.invitro$feature.gl261 <- df.meta.invitro$feature.ct2a <- (df.meta.invitro$feature)
+df.meta.invitro$feature.gl261[df.meta.invitro$model %in% "CT2A"] <- NA
+df.meta.invitro$feature.ct2a[df.meta.invitro$model %in% "GL261"] <- NA
+
+scale.lim.invitro <- c(min(df.meta.invitro$feature), max(df.meta.invitro$feature))
+
+df.meta.invivo <- getUMAP(so.invivo)[["df.umap"]]
+if (do.snip){
+  df.meta.invivo$feature <- (snip(getExpr(so.invivo,which.gene, slot = "data")))
+} else {
+  df.meta.invivo$feature <- ((getExpr(so.invivo,which.gene, slot = "data")))
+}
+
+# 
+
+df.meta.invivo$feature.gl261 <- df.meta.invivo$feature.ct2a <- (df.meta.invivo$feature)
+df.meta.invivo$feature.gl261[df.meta.invivo$model %in% "CT2A"] <- NA
+df.meta.invivo$feature.ct2a[df.meta.invivo$model %in% "GL261"] <- NA
+
+scale.lim.invivo <- c(min(df.meta.invivo$feature), max(df.meta.invivo$feature))
+
+pt.size.invitro <- 0.8
+pt.size.vivo <- 0.2
+
+p1.vitro <- ggplot() +
+  geom_point(data = df.meta.invitro %>% dplyr::filter(is.na(feature.gl261)), aes(x = x, y = y, color = feature.gl261), size = pt.size.invitro)   + 
+  geom_point(data = df.meta.invitro %>% dplyr::filter(!is.na(feature.gl261))  %>% dplyr::arrange(feature.gl261), 
+             aes(x = x, y = y, color = feature.gl261), size = pt.size.invitro)   + 
+  viridis::scale_color_viridis(limits = scale.lim.invitro, na.value = "grey90", option = "E") + 
+  theme_miko() + theme_void() + 
+  theme(legend.position = "bottom")
+
+p2.vitro <- ggplot() +
+  geom_point(data = df.meta.invitro %>% dplyr::filter(is.na(feature.ct2a)), aes(x = x, y = y, color = feature.ct2a), size = pt.size.invitro)   + 
+  geom_point(data = df.meta.invitro %>% dplyr::filter(!is.na(feature.ct2a))  %>% dplyr::arrange(feature.ct2a), 
+             aes(x = x, y = y, color = feature.ct2a), size = pt.size.invitro)   + 
+  viridis::scale_color_viridis(limits = scale.lim.invitro, na.value = "grey90", option = "E") + 
+  theme_miko() + theme_void() + 
+  theme(legend.position = "bottom")
+
+p1.vivo <-  ggplot() +
+  geom_point(data = df.meta.invivo %>% dplyr::filter(is.na(feature.gl261)), aes(x = x, y = y, color = feature.gl261), size = pt.size.vivo)   + 
+  geom_point(data = df.meta.invivo %>% dplyr::filter(!is.na(feature.gl261))  %>% dplyr::arrange(feature.gl261), 
+             aes(x = x, y = y, color = feature.gl261), size = pt.size.vivo)   + 
+  viridis::scale_color_viridis(limits = scale.lim.invivo, na.value = "grey90", option = "E") +
+  theme_miko() + theme_void() + 
+  theme(legend.position = "bottom")
+
+p2.vivo <-  ggplot() +
+  geom_point(data = df.meta.invivo %>% dplyr::filter(is.na(feature.ct2a)), aes(x = x, y = y, color = feature.ct2a), size = pt.size.vivo)   + 
+  geom_point(data = df.meta.invivo %>% dplyr::filter(!is.na(feature.ct2a))  %>% dplyr::arrange(feature.ct2a), 
+             aes(x = x, y = y, color = feature.ct2a), size = pt.size.vivo)   + 
+  viridis::scale_color_viridis(limits = scale.lim.invivo, na.value = "grey90", option = "E") + 
+  theme_miko() + theme_void() + 
+  theme(legend.position = "bottom")
+
+
+plt.expr <- cowplot::plot_grid(
+  p1.vitro, p2.vitro, p1.vivo, p2.vivo, nrow = 1
+)
+plt.expr
+
+# savePDF(paste0("GL261_CT2A_", which.gene, "_300622.pdf"), plt.expr, fig.width=11, fig.height=3)
+```
+
+```{r stem state scoring}
+
+min.pct <- 0.001
+
+ccat.invitro <- scoreStem(object =  so.invitro, method = "CCAT", min.pct = min.pct)
+stemsc.invitro <- scoreStem(object =  so.invitro, method = "StemSC", min.pct = min.pct)
+cytotrace.invitro <- scoreStem(object =  so.invitro, method = "CytoTRACE", min.pct = min.pct)# , batch = "replicate"
+
+df.stem.invitro <- data.frame(
+  x = so.invitro@reductions[["umap"]]@cell.embeddings[ ,1],
+   y = so.invitro@reductions[["umap"]]@cell.embeddings[ ,2],
+  replicate = so.invitro@meta.data$replicate,
+  ccat = ccat.invitro,
+  stemsc = stemsc.invitro,
+  cytotrace = cytotrace.invitro,
+  condition = "invitro"
+)
+
+ccat.invivo <- scoreStem(object =  so.invivo, method = "CCAT", min.pct = min.pct)
+stemsc.invivo <- scoreStem(object =  so.invivo, method = "StemSC", min.pct = min.pct)
+cytotrace.invivo <- scoreStem(object =  so.invivo, method = "CytoTRACE", min.pct = min.pct)# , batch = "replicate"
+
+df.stem.invivo <- data.frame(
+  x = so.invivo@reductions[["umap"]]@cell.embeddings[ ,1],
+   y = so.invivo@reductions[["umap"]]@cell.embeddings[ ,2],
+  replicate = so.invivo@meta.data$replicate,
+  ccat = ccat.invivo,
+  stemsc = stemsc.invivo,
+  cytotrace = cytotrace.invivo,
+  condition = "invivo"
+)
+
+df.stem <- bind_rows(df.stem.invitro, df.stem.invivo)
+
+df.stem$model <- stringr::str_extract(df.stem$replicate, "CT2A|GL261")
+
+df.stem %>%
+  ggplot(aes(x = model, y = ccat)) + 
+  geom_boxplot() + 
+  facet_wrap(~condition)
+
+df.stem %>%
+  ggplot(aes(x = model, y = stemsc)) + 
+  geom_boxplot() + 
+  facet_wrap(~condition)
+
+df.stem %>%
+  ggplot(aes(x = model, y = cytotrace)) + 
+  geom_boxplot() + 
+  facet_wrap(~condition)
+
+```
+
+
+```{r plot GSEA }
+
+miko_message("Preparing signature gene sets for scoring...")
+data(geneSets)
+
+cancer.df <- geneSets[["CancerSEA_Hs"]]
+cancer.list <- wideDF2namedList(cancer.df)
+names(cancer.list) <- paste0(names(cancer.list), "_CancerSEA")
+
+verhaak.df <- geneSets[["Verhaak_CancerCell_2010"]]
+verhaak.list <- wideDF2namedList(verhaak.df)
+names(verhaak.list) <- paste0(names(verhaak.list), "_Verhaak")
+
+richards.df <- geneSets[["Richards_NatureCancer_2021_sc"]]
+richards.list <- wideDF2namedList(richards.df)
+names(richards.list) <- paste0(names(richards.list), "_Richards")
+
+neftel.df <- geneSets[["GBM_Hs_Neftel2019"]]
+neftel.list <- wideDF2namedList(neftel.df)
+neftel.list <- neftel.list[!grepl("G", names(neftel.list))]
+names(neftel.list) <- paste0(names(neftel.list), "_Neftel")
+
+gsc.df <- geneSets[["GSC_Catalog"]]
+gsc.list <- wideDF2namedList(gsc.df)
+names(gsc.list) <- paste0(names(gsc.list), "_GS")
+
+gavish.df <- geneSets[["Gavish2022_Tumor_Hallmarks"]]
+gavish.list <- wideDF2namedList(gavish.df)
+names(gavish.list) <- paste0(names(gavish.list), "_Gavish")
+
+hallmark.df <- geneSets[["HALLMARK"]]
+hallmark.list <- wideDF2namedList(hallmark.df)
+names(hallmark.list) <- paste0(names(hallmark.list), "_HALLMARK")
+
+miko_message("Convert to mouse symbols...")
+verhaak.list <- lapply(verhaak.list, firstup)
+gsc.list <- lapply(gsc.list, firstup)
+neftel.list <- lapply(neftel.list, firstup)
+cancer.list <- lapply(cancer.list, firstup)
+gsc.list <- lapply(gsc.list, firstup)
+gavish.list <- lapply(gavish.list, firstup)
+hallmark.list <- lapply(hallmark.list, firstup)
+master.set <- c(neftel.list, richards.list, cancer.list, verhaak.list, gsc.list, gavish.list, hallmark.list)
+
+names(master.set) <- gsub("HALLMARK_", "", names(master.set))
+
+my.symbol <- unique(c(rownames(so.invitro), rownames(so.invivo)))
+my.entrez <- sym2entrez(my.symbol, my.species = "Mm" )
+my.entrez <- my.entrez[complete.cases(my.entrez), ]
+s2e <- my.entrez$ENTREZID; names(s2e) <- my.entrez$SYMBOL
+
+my.pathway.bader <- getAnnotationPathways(query.genes = my.entrez$ENTREZID, db = "Bader", ontology = "BP", species = "Mm")
+
+plotEnrichment_miko <- function (pathway, stats, gseaParam = 1, ticksSize = 0.2, do.label = T, label.size = 2.5, pathway.name = NULL, p.stat = NULL) {
+  
+  
+  df.stat <- data.frame(gene = names(stats), stat = stats)
+  
+  # 
+  a <- entrez2sym(as.character(df.stat$gene), my.species = "Mm")
+  e2s <- a$SYMBOL; names(e2s) <- as.character(a$ENTREZID)
+  df.stat$symbol <- e2s[as.character(df.stat$gene)]
+  res <- runGSEA(gene = df.stat$symbol , value = df.stat$stat, species = "Mm", my.pathway = list(current = pathway), my.entrez = a)
+  rnk <- rank(-stats, ties.method = "random")
+  ord <- order(rnk)
+  df.stat$rnk <- rnk
+  df.stat$ord <- ord
+  statsAdj <- stats[ord]
+  statsAdj <- sign(statsAdj) * (abs(statsAdj)^gseaParam)
+  statsAdj <- statsAdj/max(abs(statsAdj))
+  pathway <- unname(as.vector(na.omit(match(pathway, names(statsAdj)))))
+  path.match <- names(statsAdj)[pathway]
+  b<- entrez2sym(as.character(path.match), my.species = "Mm")
+  pathway <- sort(pathway)
+  gseaRes <- calcGseaStat(statsAdj, selectedStats = pathway, 
+    returnAllExtremes = TRUE)
+  bottoms <- gseaRes$bottoms
+  tops <- gseaRes$tops
+  n <- length(statsAdj)
+  xs <- as.vector(rbind(pathway - 1, pathway))
+  ys <- as.vector(rbind(bottoms, tops))
+  toPlot <- data.frame(x = c(0, xs, n + 1), y = c(0, ys, 0))
+  diff <- (max(tops) - min(bottoms))/8
+  x = y = NULL
+ 
+    g0 <- df.stat %>%
+    ggplot(aes(x = rnk, fill = snip(stat), y = 1)) + 
+      geom_tile() + 
+    geom_vline(xintercept = df.stat$rnk[ which.min(abs(df.stat$stat ))], linetype = "dashed") + 
+    theme_miko(legend = F) + 
+    scale_fill_miko() + 
+    labs(x = "Rank", y= NULL) +
+  theme(axis.title.y=element_blank(),
+        axis.text.y=element_blank(),
+        axis.ticks.y=element_blank())
+  
+  do.null.region <- F
+  if (do.null.region){
+    g0 <-  g0 + annotate("rect", xmin = -Inf, xmax = Inf, ymin = -1.96, ymax = 1.96, alpha = 0.2)
+  }
+
+  df.stat.sub <- df.stat %>% dplyr::filter(gene %in% as.character(names(tops)))
+  df.top <- data.frame(gene = as.character(names(gseaRes$tops)), value = gseaRes$tops)
+  df.stat.sub <- merge(df.stat.sub, df.top, by = "gene")
+  df.stat.sub$symbol <- e2s[df.stat.sub$gene]
+  
+  g <- ggplot(toPlot, aes(x = x, y = y)) + 
+    geom_hline(yintercept = max(tops), colour = "red", 
+               linetype = "dashed") + 
+    geom_hline(yintercept = min(bottoms), 
+               colour = "red", linetype = "dashed") + 
+    geom_hline(yintercept = 0, colour = "black") + 
+    geom_line(color = "tomato") + theme_bw() + 
+    geom_segment(data = data.frame(x = pathway), mapping = aes(x = x, y = -diff/2, xend = x, yend = diff/2), size = ticksSize) + 
+    theme(panel.border = element_blank(), panel.grid.minor = element_blank()) + 
+    labs(x = NULL, y = "enrichment score", title = "", 
+         subtitle = paste0(pathway.name, "\nGSEA, Recurrent - Primary\nNES = ", 
+                           signif(res[["gse.pathway"]][["NES"]]), "; p = ", signif(res[["gse.pathway"]][["pval"]]))) +
+    theme(axis.title.x=element_blank(),
+          axis.text.x=element_blank(),
+          axis.ticks.x=element_blank())
+  
+  
+  # p.stat
+  if (!is.null(p.stat)){
+    df.stat.sub$pval <- p.stat[df.stat.sub$gene]
+  }
+
+  if (do.label) g <- g + 
+    ggrepel::geom_text_repel(data = df.stat.sub, 
+                             aes(x = rnk, y = value, label = symbol, color =  pval < 0.05), max.overlaps = Inf, size = label.size) + 
+    scale_color_manual(values = c("TRUE" = "black", "FALSE" = "grey")) + theme(legend.position = "none")
+  
+  g
+  # cowplot::plot_grid(g, g0, ncol = 1, align = "v", rel_heights = c(2,1))
+}
+gseaPlot <- function(feature, score, pval = NULL, pathway, pathway.name = NULL, ...){
+  f1 <-  feature
+  f2 <- score
+  
+  
+  my.symbol <- f1
+  my.entrez <- sym2entrez(my.symbol, my.species = "Mm" )
+  my.entrez <- my.entrez[complete.cases(my.entrez), ]
+  
+  g2e <- my.entrez$ENTREZID
+  names(g2e) <- my.entrez$SYMBOL
+  
+  # head(gsea.stat)
+  gsea.stat <- (f2)
+  names(gsea.stat) <- f1
+  names(gsea.stat) <- g2e[names(gsea.stat)]
+  
+    path.cur <- pathway
+  path.cur <- as.character(path.cur)
+  path.cur <- path.cur[!is.na(path.cur)]
+  gsea.stat <- gsea.stat[!is.na(names(gsea.stat))]
+  
+  if (!is.null(pval)){
+    f3 <- pval
+    p.stat <- (f3)
+    names(p.stat) <- f1
+    names(p.stat) <- g2e[names(p.stat)]
+    
+     p.stat <- p.stat[!is.na(names(p.stat))]
+  } else {
+    p.stat <- NULL
+  }
+  
+  plotEnrichment_miko(pathway = path.cur, stats = gsea.stat, gseaParam = 1, ticksSize = 0.01, pathway.name = pathway.name, p.stat = p.stat, ...)
+  
+}
+  
+  gs.current <- lapply(master.set , function(x){
+    x <- s2e[x]
+    x <- x[!is.na(x)]
+  })
+
+
+do.label <- F
+
+path.name <- "MP16_MES_Glioma_Gavish"
+
+plt.mes <- cowplot::plot_grid(
+  gseaPlot(feature = deg.all.wide$feature, score = deg.all.wide$logFC_invitro, pval = deg.all.wide$pval_invitro, 
+           pathway = gs.current[[path.name]], pathway.name = path.name, do.label = do.label),
+  gseaPlot(feature = deg.all.wide$feature, score = deg.all.wide$logFC_invivo, pval = deg.all.wide$pval_invivo, 
+           pathway = gs.current[[path.name]], pathway.name = path.name, do.label = do.label),
+  labels = c("in vitro", "in vivo"), nrow = 1
+)
+
+path.name <- "HYPOXIA_HALLMARK"
+
+plt.hypox <- cowplot::plot_grid(
+  gseaPlot(feature = deg.all.wide$feature, score = deg.all.wide$logFC_invitro, pval = deg.all.wide$pval_invitro,
+           pathway = gs.current[[path.name]], pathway.name = path.name, do.label = do.label),
+  gseaPlot(feature = deg.all.wide$feature, score = deg.all.wide$logFC_invivo, pval = deg.all.wide$pval_invivo,
+           pathway = gs.current[[path.name]], pathway.name = path.name, do.label = do.label),
+  labels = c("in vitro", "in vivo"), nrow = 1
+)
+
+path.name <- "GLYCOLYSIS_HALLMARK"
+
+plt.glyc <- cowplot::plot_grid(
+  gseaPlot(feature = deg.all.wide$feature, score = deg.all.wide$logFC_invitro, pval = deg.all.wide$pval_invitro,
+           pathway = gs.current[[path.name]], pathway.name = path.name, do.label = do.label),
+  gseaPlot(feature = deg.all.wide$feature, score = deg.all.wide$logFC_invivo, pval = deg.all.wide$pval_invivo,
+           pathway = gs.current[[path.name]], pathway.name = path.name, do.label = do.label),
+  labels = c("in vitro", "in vivo"), nrow = 1
+)
+
+path.name <- "OPC_Neftel"
+
+plt.opc <- cowplot::plot_grid(
+  gseaPlot(feature = deg.all.wide$feature, score = deg.all.wide$logFC_invitro, pval = deg.all.wide$pval_invitro, 
+           pathway = gs.current[[path.name]], pathway.name = path.name, do.label = do.label),
+  gseaPlot(feature = deg.all.wide$feature, score = deg.all.wide$logFC_invivo, pval = deg.all.wide$pval_invivo, 
+           pathway = gs.current[[path.name]], pathway.name = path.name, do.label = do.label),
+  labels = c("in vitro", "in vivo"), nrow = 1
+)
+
+
+path.name <- "INTERFERON_GAMMA_RESPONSE_HALLMARK"
+
+plt.ifn <- cowplot::plot_grid(
+  gseaPlot(feature = deg.all.wide$feature, score = deg.all.wide$logFC_invitro, pval = deg.all.wide$pval_invitro, 
+           pathway = gs.current[[path.name]], pathway.name = path.name, do.label = do.label),
+  gseaPlot(feature = deg.all.wide$feature, score = deg.all.wide$logFC_invivo, pval = deg.all.wide$pval_invivo, 
+           pathway = gs.current[[path.name]], pathway.name = path.name, do.label = do.label),
+  labels = c("in vitro", "in vivo"), nrow = 1
+)
+
+
+path.name <- "Inflammation_CancerSEA"
+
+plt.ifn_v2 <- cowplot::plot_grid(
+  gseaPlot(feature = deg.all.wide$feature, score = deg.all.wide$logFC_invitro, pval = deg.all.wide$pval_invitro, 
+           pathway = gs.current[[path.name]], pathway.name = path.name, do.label = do.label),
+  gseaPlot(feature = deg.all.wide$feature, score = deg.all.wide$logFC_invivo, pval = deg.all.wide$pval_invivo, 
+           pathway = gs.current[[path.name]], pathway.name = path.name, do.label = do.label),
+  labels = c("in vitro", "in vivo"), nrow = 1
+)
+
+
+path.name <- "FATTY_ACID_METABOLISM_HALLMARK"
+
+plt.fa <- cowplot::plot_grid(
+  gseaPlot(feature = deg.all.wide$feature, score = deg.all.wide$logFC_invitro, pval = deg.all.wide$pval_invitro, 
+           pathway = gs.current[[path.name]], pathway.name = path.name, do.label = do.label),
+  gseaPlot(feature = deg.all.wide$feature, score = deg.all.wide$logFC_invivo, pval = deg.all.wide$pval_invivo, 
+           pathway = gs.current[[path.name]], pathway.name = path.name, do.label = do.label),
+  labels = c("in vitro", "in vivo"), nrow = 1
+)
+
+```
+
+```{r fig.width=12, fig.height=4}
+plt.mes
+plt.opc
+plt.ifn
+
+plt.hypox
+plt.glyc
+plt.fa
+
+# savePDF("gsea_glycolysis_nolabel_240622.pdf", plt.glyc, fig.width=12, fig.height=4)
+# savePDF("gsea_mes_nolabel_240622.pdf", plt.mes, fig.width=12, fig.height=4)
+# savePDF("gsea_opc_nolabel_240622.pdf", plt.opc, fig.width=12, fig.height=4)
+# savePDF("gsea_ifn_nolabel_240622.pdf", plt.ifn, fig.width=12, fig.height=4)
+# savePDF("gsea_glycolysis_label_240622.pdf", plt.glyc, fig.width=12, fig.height=4)
+# savePDF("gsea_mes_label_240622.pdf", plt.mes, fig.width=12, fig.height=4)
+# savePDF("gsea_opc_label_240622.pdf", plt.opc, fig.width=12, fig.height=4)
+# savePDF("gsea_ifn_label_240622.pdf", plt.ifn, fig.width=12, fig.height=4)
+```
+
+```{r differential tumor pathway activity}
+
+master.set <- c(neftel.list, richards.list, cancer.list, verhaak.list, gavish.list, hallmark.list, gsc.list) #  gsc.list, 
+
+ms.invivo <- runMS(so.invivo, genelist = master.set, scale = F)
+ms.invitro <- runMS(so.invitro, genelist = master.set, scale = F)
+
+df.ms.invivo <- ms.invivo$data
+df.ms.invivo$replicate <- so.invivo@meta.data$replicate
+df.ms.invivo.long <- pivot_longer(df.ms.invivo, cols = names(master.set))
+df.ms.invivo.long$condition <- "invivo"
+
+df.ms.invitro <- ms.invitro$data
+df.ms.invitro$replicate <- so.invitro@meta.data$replicate
+df.ms.invitro.long <- pivot_longer(df.ms.invitro, cols = names(master.set))
+df.ms.invitro.long$condition <- "invitro"
+
+
+df.ms.long <- bind_rows(df.ms.invivo.long, df.ms.invitro.long)
+df.ms.long$name <- gsub("HALLMARK_", "", df.ms.long$name)
+df.ms.long$model <- stringr::str_extract(df.ms.long$replicate, "CT2A|GL261")
+
+df.ms.sum <- df.ms.long %>%
+  dplyr::group_by(replicate, model, condition, name) %>%
+  dplyr::summarise(
+    x.mean = mean(value),
+    x.median = median(value)
+  )
+
+df.ms.dif <- df.ms.sum %>%
+  dplyr::group_by(name, condition) %>%
+  dplyr::summarise(
+    ct2a.activity = mean(x.mean[model %in% "CT2A"]),
+    gl261.activity = mean(x.mean[model %in% "GL261"]),
+    delta = mean(x.mean[model %in% "CT2A"]) - mean(x.mean[model %in% "GL261"]),
+    sp =  sqrt(var(x.mean[model %in% "CT2A"]) + var(x.mean[model %in% "GL261"])),
+    n = length(x.mean),
+    p = t.test(x.mean[model %in% "CT2A"], x.mean[model %in% "GL261"])$p.value
+  )
+
+df.ms.dif$z <- p2z(df.ms.dif$p) * sign(df.ms.dif$delta)
+
+df.ms.dif.wide <- pivot_wider(df.ms.dif, names_from = "condition", values_from = c("delta", "p", "z", "sp", "n", "ct2a.activity", "gl261.activity"))
+
+df.ms.dif.wide$z_pool <- ((df.ms.dif.wide$z_invitro * 4) + (df.ms.dif.wide$z_invivo * 6))/10
+df.ms.dif.wide$p_pool <- z2p(df.ms.dif.wide$z_pool )
+df.ms.dif.wide$sig <-  p_pool < 0.1 &( sign(z_invitro) == sign(z_invivo))
+
+
+df.ms.dif.wide$dd <- df.ms.dif.wide$delta_invivo - df.ms.dif.wide$delta_invitro
+df.ms.dif.wide$spp <- sqrt((df.ms.dif.wide$sp_invitro^2) + (df.ms.dif.wide$sp_invivo^2))
+df.ms.dif.wide$z.dd <- df.ms.dif.wide$dd/df.ms.dif.wide$spp
+df.ms.dif.wide$p.dd <- z2p(df.ms.dif.wide$z.dd)
+
+path.cor <- cor.test(df.ms.dif.wide$delta_invitro, df.ms.dif.wide$delta_invivo)
+path.cor
+ppath <- df.ms.dif.wide %>%
+  dplyr::arrange(abs(z_pool)) %>%
+  ggplot(aes(x = delta_invitro, y = delta_invivo, fill = z_pool,  color = p_pool < 0.1 &( sign(z_invitro) == sign(z_invivo)), size = snip(abs(z_pool)))) +
+  geom_point(pch = 21) +
+  geom_hline(yintercept = 0) +
+  geom_vline(xintercept = 0) +
+   theme_miko(legend = T) +
+  scale_fill_miko(na.value = "grey", low = gl261.color, high = ct2a.color) +
+  scale_color_manual(values = c("TRUE" = "black", "FALSE" =  "grey")) +
+  labs(title = "CT2A vs GL261 Differential Pathways", x = "in vitro (CT2A - GL261)", y = "in vivo (CT2A - GL261)",
+       color = "p<0.05", fill = "z", size = "|z|")
+ppath
+
+ppath.lab <- df.ms.dif.wide %>%
+  dplyr::arrange(abs(z_pool)) %>%
+  ggplot(aes(x = delta_invitro, y = delta_invivo, fill = z_pool,  color = p_pool < 0.1 &( sign(z_invitro) == sign(z_invivo)), size = snip(abs(z_pool)))) +
+  geom_text(aes(label = name), size = 2) +
+  geom_hline(yintercept = 0) +
+  geom_vline(xintercept = 0) +
+   theme_miko(legend = T) +
+  scale_fill_miko(na.value = "grey") +
+  scale_color_manual(values = c("TRUE" = "black", "FALSE" =  "grey")) +
+  labs(title = "CT2A vs GL261 Differential Pathways", x = "in vitro (CT2A - GL261)", y = "in vivo (CT2A - GL261)",
+       color = "p<0.05", fill = "z", size = "|z|")
+ppath.lab
+
+# savePDF(file.name = "CT2A_GL261_cancerPath_noLabel_300622.pdf", ppath, fig.width = 8, fig.height = 6)
+# savePDF(file.name = "CT2A_GL261_cancerPath_Label_300622.pdf", ppath.lab, fig.width = 8, fig.height = 6)
+
+# savePDF("UMAP_GL261_CT2A_300622.pdf", plt.invitro_invivo, fig.width=8, fig.height=4)
+```
+

@@ -1,0 +1,2857 @@
+---
+  title: "TNF vs. IFN sensitivity"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output: 
+  flexdashboard::flex_dashboard:
+  orientation: rows
+vertical_layout: fill
+editor_options: 
+  chunk_output_type: inline
+knit: (function(inputFile, encoding) {
+  rmarkdown::render(input = inputFile,
+                    encoding = encoding,
+                    output_file = if (exists("user")){paste0(
+                      xfun::sans_ext(inputFile), '_',user, "_", format(Sys.Date(), "%d%m%y"), '.html'
+                    )} else {paste0(xfun::sans_ext(inputFile), '_',"Guest", "_", format(Sys.Date(), "%d%m%y"), '.html')},
+                    output_dir = if (exists("data.path")) paste0(data.path, "/HTML_Reports") else NULL
+  )
+})
+---
+  
+  
+  
+```{r load libraries, include=FALSE}
+
+# clear global enviroment                          
+rm(list = setdiff(ls(), c("data.path", "user")))
+invisible({gc()})
+
+# initiate timer
+start.time <- proc.time()
+
+# load packages
+packages2load <- c("scMiko", "Seurat", "plyr",  "dplyr", "tidyr", "reshape2", 
+                   "DT", "flexdashboard", "ggpmisc", "future", "foreach", "doParallel",
+                   "AnnotationDbi", "org.Mm.eg.db", "org.Hs.eg.db", "fgsea", "ggplot2", "reactome.db",
+                   "schex", "RColorBrewer", "cowplot")
+
+# load packages
+invisible(lapply(packages2load, library, character.only = TRUE))
+
+```
+
+```{r parameter specification}
+
+# analysis parameters
+cluster.resolution <- 1
+subset.df <- "no.subset"
+which.species <- "Mm" # Option: Mm or Hs
+
+# downsample factor
+subsample_factor <- 0.75
+
+ct2a.color <- brewer.pal(n = 3, "BrBG")[3]
+gl261.color <- brewer.pal(n = 3, "BrBG")[1]
+
+
+```
+
+```{r import data}
+
+dir.path <- "C:/Users/n mikolajewicz/Dropbox/PDF Projects - JM/Data/scRNA-seq/01_sci-RNA-seq3_Hong_Kevin_Jason/NM_HH/GBM/Reboot/Data/01_CRISPR_screens/MUS_screens/"
+
+all.folders <- list.files(path = dir.path)
+
+limma.list <- list()
+for (i in 1:length(all.folders)){
+  current.folder <- all.folders[i]
+  limma.list[[current.folder]] <- read.delim(file = paste0(dir.path, current.folder, "/limma_results.txt"))
+  colnames( limma.list[[current.folder]]) <- c("gene", "lfc", "n_genes", "direction", "pval", "fdr")
+  limma.list[[current.folder]]$sample <- current.folder
+}
+
+df.limma <- dplyr::bind_rows(limma.list)
+df.limma$z <- scMiko::p2z(df.limma$fdr) * sign(df.limma$lfc)
+
+```
+
+
+```{r consolidate results}
+library(tidyr)
+library(dplyr)
+library(scMiko)
+
+df.z.wide <- pivot_wider(data = df.limma %>% dplyr::select(c("gene", "sample", "z")), names_from = "sample", values_from = "z")
+df.z.wide <- col2rowname(df.z.wide, "gene")
+df.z.wide[is.na(df.z.wide)] <- 0
+df.z.wide$`MUS026_CT2A-OVA_Vehicle-T23_vs_IFNg-T23` <- -1*(df.z.wide$`MUS026_CT2A-OVA_Vehicle-T23_vs_IFNg-T23`)
+
+df.lfc.wide <- pivot_wider(data = df.limma %>% 
+                           dplyr::select(c("gene", "sample", "lfc")), names_from = "sample", values_from = "lfc")
+df.lfc.wide <- col2rowname(df.lfc.wide, "gene")
+df.lfc.wide[is.na(df.lfc.wide)] <- 0
+df.lfc.wide$`MUS026_CT2A-OVA_Vehicle-T23_vs_IFNg-T23` <- -1*(df.lfc.wide$`MUS026_CT2A-OVA_Vehicle-T23_vs_IFNg-T23`)
+
+which.sig2 <- Matrix::rowSums(abs(df.z.wide) > 1.96) > 0
+
+df.z.wide.sig <- df.z.wide[which.sig2, ]
+z.cor <- cor(df.z.wide.sig)
+
+
+```
+```{r get DEG genes, fig.width=6*2, fig.height=8}
+
+z.threshold <- p2z(0.05)
+
+df.limma$dir <- "other"
+df.limma$dir[df.limma$z > z.threshold] <- "up"
+df.limma$dir[df.limma$z < -z.threshold] <- "down"
+
+df.gs.list <- (df.limma %>%
+  dplyr::group_by(sample, dir) %>% 
+  dplyr::summarize(gs = list(gene))) %>% 
+  dplyr::filter(dir %in% c("up", "down")) %>% 
+  dplyr::mutate(label = paste0(sample, "_", dir))
+
+gs.list <- df.gs.list$gs
+names(gs.list) <- df.gs.list$label
+
+jmat <- jaccardSimilarityMatrix(gs.list)
+
+
+ncut <- 8
+miko_heatmap(jmat, show_colnames = F, border_color = NA, cutree_rows = ncut, cutree_cols = ncut)
+```
+
+
+```{r organize gene sets}
+
+set.sirpa_up <- c("MUS024_BV-2_SIRPA-sort_Top15-T13_vs_Bottom15_T13_up", 
+  "MUS023_RAW2647_SIRPA-sort_Top15-T7_vs_Bottom15-T7_up", 
+  "MUS025_J7741_SIRPA-sort_Top15-T9_vs_Bottom15_T9_up")
+
+set.sirpa_down <- c(
+  "MUS023_RAW2647_SIRPA-sort_Top15-T7_vs_Bottom15-T7_down", 
+  "MUS025_J7741_SIRPA-sort_Top15-T9_vs_Bottom15_T9_down")
+
+set.phag_up <- c(
+  "MUS031_CT2A_J774-T31_vs_J774-aCD9-T31_up",
+"MUS028_CT2A_Ctrl-J774-T27_vs_J774-aCD29-T27_up"
+)
+
+set.phag_down <- c(
+  "MUS031_CT2A_J774-T31_vs_J774-aCD9-T31_down",
+"MUS028_CT2A_Ctrl-J774-T27_vs_J774-aCD29-T27_down"
+)
+
+set.allimmune <- c(
+  "MUS019_CT2A-OVA_Ctrl-T10_vs_CTL-T10",
+  "MUS019_CT2A-OVA_Ctrl-T19_vs_CTL-T19"  ,
+  "MUS021_CT2A-OVA_Ctrl-T29_vs_NK-T29",
+  "MUS022_CT2A-OVA_Ctrl-T15_vs_J7741-T9",
+  "MUS028_CT2A_Ctrl-T27_vs_J774-T27"  ,
+  "MUS031_CT2A_Ctrl-T31_vs_J774-T31" ,
+  "MUS022_CT2A-OVA-Ctrl-T21_vs_BV2-T21" ,
+  "MUS022_CT2A-OVA_Ctrl-T21_vs_RAW2647-T21"
+)
+
+set.myeloid <- c(
+  "MUS022_CT2A-OVA_Ctrl-T15_vs_J7741-T9",
+  "MUS028_CT2A_Ctrl-T27_vs_J774-T27"  ,
+  "MUS031_CT2A_Ctrl-T31_vs_J774-T31" ,
+  "MUS022_CT2A-OVA-Ctrl-T21_vs_BV2-T21" ,
+  "MUS022_CT2A-OVA_Ctrl-T21_vs_RAW2647-T21"
+)
+
+
+set.ctl <- c(
+  "MUS019_CT2A-OVA_Ctrl-T10_vs_CTL-T10",
+  "MUS019_CT2A-OVA_Ctrl-T19_vs_CTL-T19",
+"MUS020_GL261-OVA_Ctrl-T18_vs_CTL-T20",
+"MUS020_GL261-OVA_Ctrl-T24_vs_CTL-T26"
+)
+
+
+set.myeloid_up <- paste0(set.myeloid, "_up")
+set.myeloid_down <- paste0(set.myeloid, "_down")
+
+set.ctl_down <- paste0(set.ctl, "_down")
+set.ctl_up <- paste0(set.ctl, "_up")
+
+set.allimmune_down <- paste0(set.allimmune, "_down")
+
+current.set <- set.ctl_up
+# current.set <- set.sirpa_down
+
+lintersect(gs.list[current.set])
+
+upset.Plot(gs.list[current.set])
+ggVennDiagram::ggVennDiagram(gs.list[current.set])
+
+set.phag_up <- c(
+  "MUS031_CT2A_J774-T31_vs_J774-aCD9-T31_up",
+"MUS028_CT2A_Ctrl-J774-T27_vs_J774-aCD29-T27_up"
+)
+
+
+set.allimmune <- c("MUS019_CT2A-OVA_Ctrl-T10_vs_CTL-T10",
+"MUS019_CT2A-OVA_Ctrl-T19_vs_CTL-T19"  ,
+"MUS021_CT2A-OVA_Ctrl-T29_vs_NK-T29",
+"MUS022_CT2A-OVA_Ctrl-T15_vs_J7741-T9",
+"MUS028_CT2A_Ctrl-T27_vs_J774-T27"  ,
+"MUS031_CT2A_Ctrl-T31_vs_J774-T31" ,
+"MUS022_CT2A-OVA-Ctrl-T21_vs_BV2-T21" ,
+"MUS022_CT2A-OVA_Ctrl-T21_vs_RAW2647-T21" )
+```
+
+```{r visualize pairwise correlation in LFC values}
+df.lfc.wide %>%
+  ggplot(aes(x = `MUS026_CT2A-OVA_Vehicle-T23_vs_IFNg-T23`, y = `MUS019_CT2A-OVA_Ctrl-T19_vs_CTL-T19`)) +
+  geom_point()
+
+
+df.lfc.wide %>%
+  ggplot(aes(x = `MUS028_CT2A_Ctrl-T27_vs_J774-T27`, y = `MUS019_CT2A-OVA_Ctrl-T19_vs_CTL-T19`)) +
+  geom_point()
+
+df.lfc.wide %>%
+  ggplot(aes(x = `MUS028_CT2A_Ctrl-T27_vs_J774-T27`, y = `MUS019_CT2A-OVA_Ctrl-T19_vs_CTL-T19`)) +
+  geom_point()
+```
+
+```{r Gene Rank per Sample, fig.width=2, fig.height=5}
+
+gr.plot <- function(dat, which.filter, which.val = "z", scale.lim = 13){
+  
+  if (which.val == "lfc"){
+    dat$z <- dat$lfc
+  } else if (which.val == "p"){
+    dat$z <- dat$logp 
+  }
+  
+  df.current <- dat %>%
+    dplyr::filter(grepl(which.filter, sample)) %>%
+    dplyr::mutate(gene.rank = rank(z, ties.method = "random"))
+  
+  df.current$type <- "Other"
+  df.current$type[df.current$lfc > 0 & df.current$fdr < 0.05] <- "Suppressor"
+  df.current$type[df.current$lfc < 0 & df.current$fdr < 0.05] <- "Sensitizer"
+  
+  
+  stopifnot(nrow(df.current) < 20000)
+  
+  df.top <-  bind_rows(df.current %>% dplyr::top_n(10, z), df.current %>% dplyr::top_n(10, -z))
+
+  point.size <- 1
+  df.current %>%
+    dplyr::arrange(-abs(z)) %>%
+    ggplot((aes(x = gene.rank, y = z))) + 
+    scattermore::geom_scattermore(aes(fill =type), color = "grey",pch=21, pointsize = point.size) + 
+    geom_point(data = subset(df.current, type == 'Sensitizer') %>%  dplyr::arrange(abs(z)) , 
+               aes(x = gene.rank, y = z, fill =type, fill = type,  size = abs(z)), color = "black",pch=21) + 
+    geom_point(data = subset(df.current, type == 'Suppressor') %>%  dplyr::arrange(abs(z)) , 
+               aes(x = gene.rank, y = z, type =type, fill = type, size = abs(z)), color = "black",pch=21) + 
+    xlab("Gene Rank") + 
+    ylab("Z (Limma)") + 
+    geom_hline(yintercept = 0, linetype = "dashed") + 
+    theme_classic() +
+    scale_size(range = c(1,6)) +
+    ggtitle("Gene Rank Differences") +
+    ggrepel::geom_text_repel(data = df.top, aes(x = gene.rank, y = z, label = gene), max.overlaps = Inf) +
+    scale_fill_manual(values = c("Other" = "#A9A9A9","Sensitizer" = "#0000FF" ,"Suppressor" =  "#FFFF00")) + 
+    theme(legend.position = "none") + 
+    coord_cartesian(ylim = c(-scale.lim, scale.lim))
+  
+}
+
+which.val = "z"
+
+
+df.limma$logp <- -log10(df.limma$fdr) * sign(df.limma$lfc)
+
+p1 <- gr.plot(dat = df.limma, which.filter = "CT2A-OVA_Ctrl-T19_vs_CTL-T19", which.val = which.val ) +
+  labs(title = "CT2A/CTL", subtitle = "T19")
+p2 <- gr.plot(dat = df.limma, which.filter = "NK-T29", which.val = which.val) + 
+  labs(title = "NK Cells", subtitle = "T29")
+p3 <- gr.plot(dat = df.limma %>% dplyr::filter(sample %in% "MUS031_CT2A_Ctrl-T31_vs_J774-T31"), 
+              which.filter = "J774-T31", which.val = which.val) + 
+  labs(title = "J774 - macrophage", subtitle = "non-phagocyctic")
+
+p4 <- gr.plot(dat = df.limma, which.filter = "Ctrl-T21_vs_RAW2647-T21", which.val = which.val) + 
+  labs(title = "Raw 264.6 - T21", subtitle = "macrophage")
+p5 <- gr.plot(dat = df.limma, which.filter = "CT2A-OVA-Ctrl-T21_vs_BV2-T21", which.val = which.val) + 
+  labs(title = "BV2 - T21", subtitle = "microglia")
+p6 <- gr.plot(dat = df.limma, which.filter = "Ctrl-T27_vs_J774-aCD29-T27", which.val = which.val) + 
+  labs(title = "J774 - Microglia + aCD29", subtitle = "phagocyctic") # J7741-T9, J7741-T27
+p7 <- gr.plot(dat = df.limma, which.filter = "Ctrl-T31_vs_J774-aCD9-T31", which.val = which.val) + 
+  labs(title = "J774 - Microglia + aCD9", subtitle = "phagocyctic") # J7741-T9, J7741-T27
+
+```
+
+
+```{r check GL261 screens, fig.width=2*2, fig.height=5}
+
+which.GL261 <- "MUS020_GL261-OVA_Ctrl-T18_vs_CTL-T20"
+ctl.comparison.sensitizer <- list(
+  GL261 = (df.limma %>% dplyr::filter(sample %in% which.GL261, fdr < 0.05, lfc < 0))$gene,
+  CT2A = (df.limma %>% dplyr::filter(sample %in% "MUS019_CT2A-OVA_Ctrl-T19_vs_CTL-T19", fdr < 0.05, lfc < 0))$gene
+)
+plt.sens.venn <- ggVennDiagram::ggVennDiagram(ctl.comparison.sensitizer)
+
+lintersect(ctl.comparison.sensitizer)
+
+ctl.comparison.resister <- list(
+  GL261 = (df.limma %>% dplyr::filter(sample %in% which.GL261, fdr < 0.05, lfc > 0))$gene,
+  CT2A = (df.limma %>% dplyr::filter(sample %in% "MUS019_CT2A-OVA_Ctrl-T19_vs_CTL-T19", fdr < 0.05, lfc > 0))$gene
+)
+plt.resist.venn <- ggVennDiagram::ggVennDiagram(ctl.comparison.resister)
+
+lintersect(ctl.comparison.resister)
+
+p1.gl261 <- gr.plot(dat = df.limma, which.filter = "MUS020_GL261-OVA_Ctrl-T18_vs_CTL-T20", which.val = which.val) + 
+  labs(title = "GL261 - CTL", subtitle = "Early")
+
+p2.gl261 <- gr.plot(dat = df.limma, which.filter = "MUS020_GL261-OVA_Ctrl-T24_vs_CTL-T26", which.val = which.val) + 
+  labs(title = "GL261 - CTL", subtitle = "Late")
+
+plt.combo <- cowplot::plot_grid(p1.gl261, p2.gl261, nrow = 1)
+plt.combo
+
+# savePDF("Reboot12_GL261_vs_CT2A_CTL_sens_venn_170224.pdf", plt.sens.venn)
+# savePDF("Reboot12_GL261_vs_CT2A_CTL_resist_venn_170224.pdf", plt.resist.venn)
+# savePDF("Reboot12_rankPlots_GL261_coculture_screens_v1_170224.pdf", plt.combo, fig.width=2*2, fig.height=5)
+
+
+```
+
+
+```{r save gene rank plots, fig.width=2*7, fig.height=5}
+
+plt.combo <- cowplot::plot_grid(p5, p4, p3, p6, p7, p1, p2,  nrow = 1)
+plt.combo
+
+# savePDF("Reboot12_rankPlots_coculture_screens_v2_110623.pdf", plt.combo, fig.width=2*7, fig.height=5)
+```
+
+
+```{r evaluate cd29 regulators, fig.width=12, fig.height=5}
+
+p.cd29_sort <- gr.plot(dat = df.limma, which.filter = "CD29-sort_Top15", which.val = which.val) +
+  labs(title = "CD29 sort", subtitle = "CD29 sort") # J7741-T9, J7741-T27
+
+  df.cd29_sort <- df.limma %>%
+    dplyr::filter(grepl("CD29-sort_Top15", sample)) %>%
+    dplyr::mutate(gene.rank = rank(z, ties.method = "random"))
+  
+    df.ADCD <- df.limma %>%
+    dplyr::filter(grepl("Ctrl-T27_vs_J774-aCD29-T27", sample)) %>%
+    dplyr::mutate(gene.rank = rank(z, ties.method = "random"))
+    
+      df.ADCD_vs_soluble <- df.limma %>%
+    dplyr::filter(grepl("J774-T27_vs_J774-aCD29-T27", sample)) %>%
+    dplyr::mutate(gene.rank = rank(z, ties.method = "random"))
+      
+      
+        df.cd9_sort <- df.limma %>%
+    dplyr::filter(grepl("CD29-sort_Top15", sample)) %>%
+    dplyr::mutate(gene.rank = rank(z, ties.method = "random"))
+  
+    df.ADCD_cd9 <- df.limma %>%
+    dplyr::filter(grepl("Ctrl-T31_vs_J774-aCD9-T31", sample)) %>%
+    dplyr::mutate(gene.rank = rank(z, ties.method = "random"))
+    
+      df.ADCD_vs_soluble_cd9 <- df.limma %>%
+    dplyr::filter(grepl("J774-T31_vs_J774-aCD9-T31", sample)) %>%
+    dplyr::mutate(gene.rank = rank(z, ties.method = "random"))
+      
+      fdr.thresh <- 0.3
+
+  cd29.up.list <- list(
+    cd29_sort = df.cd29_sort$gene[df.cd29_sort$lfc > 0 & df.cd29_sort$fdr < fdr.thresh],
+    ADCD = df.ADCD$gene[df.ADCD$lfc > 0 & df.ADCD$fdr < fdr.thresh],
+    A_vs_S = df.ADCD_vs_soluble$gene[df.ADCD_vs_soluble$lfc > 0 & df.ADCD_vs_soluble$fdr < fdr.thresh]
+  )
+  
+  ggVennDiagram::ggVennDiagram(cd29.up.list)
+
+    cd29.down.list <- list(
+    cd29_sort = df.cd29_sort$gene[df.cd29_sort$lfc < 0 & df.cd29_sort$fdr < fdr.thresh],
+    ADCD = df.ADCD$gene[df.ADCD$lfc < 0 & df.ADCD$fdr < fdr.thresh],
+    A_vs_S = df.ADCD_vs_soluble$gene[df.ADCD_vs_soluble$lfc < 0 & df.ADCD_vs_soluble$fdr < fdr.thresh]
+  )
+    
+      cd9.up.list <- list(
+    cd9_sort = df.cd9_sort$gene[df.cd9_sort$lfc > 0 & df.cd9_sort$fdr < fdr.thresh],
+    ADCD = df.ADCD_cd9$gene[df.ADCD_cd9$lfc > 0 & df.ADCD_cd9$fdr < fdr.thresh],
+    A_vs_S = df.ADCD_vs_soluble_cd9$gene[df.ADCD_vs_soluble_cd9$lfc > 0 & df.ADCD_vs_soluble_cd9$fdr < fdr.thresh]
+  )
+  
+  ggVennDiagram::ggVennDiagram(cd29.up.list)
+
+    cd9.down.list <- list(
+    cd9_sort = df.cd9_sort$gene[df.cd9_sort$lfc < 0 & df.cd9_sort$fdr < fdr.thresh],
+    ADCD = df.ADCD_cd9$gene[df.ADCD_cd9$lfc < 0 & df.ADCD_cd9$fdr < fdr.thresh],
+    A_vs_S = df.ADCD_vs_soluble_cd9$gene[df.ADCD_vs_soluble_cd9$lfc < 0 & df.ADCD_vs_soluble_cd9$fdr < fdr.thresh]
+  )
+
+     df.ADCD_vs_soluble$CD29_sort <- "SIG"
+     df.ADCD_vs_soluble$CD29_sort[df.ADCD_vs_soluble$gene %in% cd29.up.list$cd29_sort] <- "UP"
+     df.ADCD_vs_soluble$CD29_sort[df.ADCD_vs_soluble$gene %in% cd29.down.list$cd29_sort] <- "DOWN"
+     df.ADCD_vs_soluble$CD29_sort[df.ADCD_vs_soluble$fdr > fdr.thresh] <- "other"
+
+        df.ADCD_vs_soluble_cd9$CD9_sort <- "SIG"
+     df.ADCD_vs_soluble_cd9$CD9_sort[df.ADCD_vs_soluble_cd9$gene %in% cd9.up.list$cd9_sort] <- "UP"
+     df.ADCD_vs_soluble_cd9$CD9_sort[df.ADCD_vs_soluble_cd9$gene %in% cd9.down.list$cd9_sort] <- "DOWN"
+     df.ADCD_vs_soluble_cd9$CD9_sort[df.ADCD_vs_soluble_cd9$fdr > fdr.thresh] <- "other"
+  
+     
+     df.ADCD_vs_soluble.sig <- df.ADCD_vs_soluble %>% dplyr::filter(fdr < fdr.thresh)
+   p1 <-   df.ADCD_vs_soluble %>%
+       ggplot(aes(x = lfc, y = -log10(pval), color = CD29_sort)) + 
+       geom_point() + 
+       ggrepel::geom_text_repel(data = df.ADCD_vs_soluble.sig, aes(x = lfc, y = -log10(pval), label = gene), 
+                                max.overlaps = Inf, min.segment.length = 0) + 
+       geom_hline(yintercept = -log10(max(df.ADCD_vs_soluble.sig$pval)), linetype = "dashed") + 
+       geom_vline(xintercept = 0, linetype = "dashed") + 
+       scale_color_manual(values = c("UP" = "red", "DOWN" = "BLUE", "other" = "grey", "SIG" = "black")) + 
+       theme_miko() + 
+       theme(legend.position = "right") + 
+       labs(x = "LFC (non-phagocyte / phagocyte)", subtitle  = "J774.7 + aCD29", y = "p-value")
+     
+     
+          df.ADCD_vs_soluble_cd9.sig <- df.ADCD_vs_soluble_cd9 %>% dplyr::filter(fdr < fdr.thresh)
+    p2 <- df.ADCD_vs_soluble_cd9 %>%
+       ggplot(aes(x = lfc, y = -log10(pval), color = CD9_sort)) + 
+       geom_point() + 
+       ggrepel::geom_text_repel(data = df.ADCD_vs_soluble_cd9.sig, aes(x = lfc, y = -log10(pval), label = gene), 
+                                max.overlaps = Inf, min.segment.length = 0) + 
+       geom_hline(yintercept = -log10(max(df.ADCD_vs_soluble.sig$pval)), linetype = "dashed") + 
+       geom_vline(xintercept = 0, linetype = "dashed") + 
+       scale_color_manual(values = c("UP" = "red", "DOWN" = "BLUE", "other" = "grey", "SIG" = "black")) + 
+       theme_miko() + 
+       theme(legend.position = "right") + 
+       labs(x = "LFC (non-phagocyte / phagocyte)", subtitle  = "J774.7 + aCD9", y = "p-value")
+    
+    cowplot::plot_grid(p1, p2)
+```
+
+```{r cd29 sort screen}
+
+p.cd29_sort <- gr.plot(dat = df.limma, which.filter = "CD29-sort_Top15", which.val = which.val, scale.lim = 20) +
+  labs(title = "CD29 sort", subtitle = "CD29 sort") # J7741-T9, J7741-T27
+p.cd29_sort
+
+df.sort.limma <- df.limma %>% dplyr::filter(grepl("CD29-sort_Top15", sample))
+
+sort.list <- list(
+  top15 = df.sort.limma$gene[df.sort.limma$fdr < 0.05 & df.sort.limma$lfc > 0],
+  bottom15 = df.sort.limma$gene[df.sort.limma$fdr < 0.05 & df.sort.limma$lfc < 0]
+)
+
+# savePDF("Reboot12_CD29_top15_enrichment_180224.pdf", p1)
+# savePDF("Reboot12_CD29_bottom15_enrichment_180224.pdf", p2)
+# savePDF("Reboot12_CD29_sort_180224.pdf", p.cd29_sort, fig.width=2*1, fig.height=5)
+
+```
+
+```{r ADCP vs. nonADCP comparison plot, fig.width=6.5, fig.height=5}
+p1
+# savePDF("Reboot12_J774_phag_vs_nophag_180224.pdf", p1, fig.width = 6.5, fig.height = 5)
+```
+
+```{r check enrichment for Neftel subtypes }
+
+cancer.df <- geneSets[["CancerSEA_Hs"]]
+cancer.list <- wideDF2namedList(cancer.df)
+
+verhaak.df <- geneSets[["Verhaak_CancerCell_2010"]]
+verhaak.list <- wideDF2namedList(verhaak.df)
+
+gsc.df <- geneSets[["Richards_NatureCancer_2021_sc"]]
+gsc.list <- wideDF2namedList(gsc.df)
+
+neftel.df <- geneSets[["GBM_Hs_Neftel2019"]]
+neftel.list <- wideDF2namedList(neftel.df)
+neftel.list <- neftel.list[!grepl("G", names(neftel.list))]
+
+df.nmf.glioma <- read.csv("C:/Users/n mikolajewicz/Dropbox/PDF Projects - JM/Collaborations/Zsolt/GBM_2022/data/Genesets/nmf_genesets/murine_glioma_NMF_programs.csv")
+miko.list <- wideDF2namedList(df.nmf.glioma)
+
+
+# cancer.list <- lapply(cancer.list, firstup)
+verhaak.list <- lapply(verhaak.list, firstup)
+gsc.list <- lapply(gsc.list, firstup)
+neftel.list <- lapply(neftel.list, firstup)
+miko.list <- lapply(miko.list, firstup)
+
+# names(cancer.list) <- paste0("cancerSEA_", names(cancer.list))
+names(verhaak.list) <- paste0("Verhaak_", names(verhaak.list))
+names(gsc.list) <- paste0("Richards_", names(gsc.list))
+names(neftel.list) <- paste0("Neftel_", names(neftel.list))
+names(miko.list) <- paste0("Miko_", names(miko.list))
+
+# cancer.list,
+master.list <- c( verhaak.list, gsc.list, neftel.list, miko.list)
+my.entrez <- sym2entrez(my.symbols = unique(df.limma$gene), "Mm")
+
+my.entrez <- my.entrez[complete.cases(my.entrez), ]
+g2e <- as.character(my.entrez$ENTREZID); names(g2e) <- my.entrez$SYMBOL
+e2g <- as.character(my.entrez$SYMBOL); names(e2g) <- my.entrez$ENTREZID
+
+
+master.list.entrez <- lapply(master.list, function(x){
+  x <- as.character(g2e[x])
+  x <- x[!is.na(x)]
+  return(x)
+  })
+
+which.val <- "z"
+
+df.cur <- df.limma %>% dplyr::filter(grepl("CT2A-OVA_Ctrl-T19_vs_CTL-T19", sample))
+gsea.ctl <- runGSEA(gene = df.cur$gene, value = df.cur[ ,which.val], species = "Mm", 
+                    my.entrez = my.entrez, my.pathway = master.list.entrez)
+df.gsea.ctl <- gsea.ctl$gse.pathway
+gsea.ctl$plt.gsea
+
+df.cur <- df.limma %>% dplyr::filter(grepl("NK-T29", sample))
+gsea.nk <- runGSEA(gene = df.cur$gene, value = df.cur[ ,which.val], species = "Mm", 
+                    my.entrez = my.entrez, my.pathway = master.list.entrez)
+df.gsea.nk <- gsea.nk$gse.pathway
+gsea.nk$plt.gsea
+
+df.cur <- df.limma %>% dplyr::filter(sample %in% "MUS028_CT2A_Ctrl-T27_vs_J774-T27")
+gsea.j774_nonphag <- runGSEA(gene = df.cur$gene, value = df.cur[ ,which.val], species = "Mm", 
+                    my.entrez = my.entrez, my.pathway = master.list.entrez)
+df.gsea.j774_nonphag <- gsea.j774_nonphag$gse.pathway
+gsea.j774_nonphag$plt.gsea
+
+df.cur <- df.limma %>% dplyr::filter(grepl("Ctrl-T21_vs_RAW2647-T21", sample))
+gsea.raw_nonphag <- runGSEA(gene = df.cur$gene, value = df.cur[ ,which.val], species = "Mm", 
+                    my.entrez = my.entrez, my.pathway = master.list.entrez)
+df.gsea.raw_nonphag <- gsea.raw_nonphag$gse.pathway
+gsea.raw_nonphag$plt.gsea
+
+df.cur <- df.limma %>% dplyr::filter(grepl("CT2A-OVA-Ctrl-T21_vs_BV2-T21", sample))
+gsea.bv2 <- runGSEA(gene = df.cur$gene, value = df.cur[ ,which.val], species = "Mm", 
+                    my.entrez = my.entrez, my.pathway = master.list.entrez)
+df.gsea.bv2 <- gsea.bv2$gse.pathway
+gsea.bv2$plt.gsea
+
+df.cur <- df.limma %>% dplyr::filter(grepl("Ctrl-T27_vs_J774-aCD29-T27", sample))
+gsea.j774_aCD29 <- runGSEA(gene = df.cur$gene, value = df.cur[ ,which.val], species = "Mm", 
+                    my.entrez = my.entrez, my.pathway = master.list.entrez)
+df.gsea.j774_aCD29 <- gsea.j774_aCD29$gse.pathway
+gsea.j774_aCD29$plt.gsea
+
+
+df.cur <- df.limma %>% dplyr::filter(grepl("Ctrl-T31_vs_J774-aCD9-T31", sample))
+gsea.j774_aCD9 <- runGSEA(gene = df.cur$gene, value = df.cur[ ,which.val], species = "Mm", 
+                    my.entrez = my.entrez, my.pathway = master.list.entrez)
+df.gsea.j774_aCD9 <- gsea.j774_aCD9$gse.pathway
+gsea.j774_aCD9$plt.gsea
+
+
+df.gsea.ctl$set <- "CTL"
+df.gsea.nk$set <- "NK"
+df.gsea.j774_nonphag$set <- "J774_nonphag"
+df.gsea.raw_nonphag$set <- "Raw264_nonphag"
+df.gsea.bv2$set <- "bv2" <- "BV2_nonphag"
+df.gsea.j774_aCD29$set <- "J774_aCD29"
+df.gsea.j774_aCD9$set <- "J774_aCD9"
+
+df.gsea.all <- bind_rows(df.gsea.ctl, df.gsea.nk, df.gsea.j774_nonphag, 
+                         df.gsea.raw_nonphag, df.gsea.bv2, df.gsea.j774_aCD29, df.gsea.j774_aCD9)
+
+df.gsea.all$logp <- -log10(df.gsea.all$padj) * sign(df.gsea.all$NES)
+which.metric<- "logp"
+df.gsea.all.wide <- col2rowname(df.gsea.all %>% dplyr::select(c("pathway", which.metric, "set")) %>% 
+                                  pivot_wider(names_from = "set", values_from = which.metric), "pathway")
+miko_heatmap(df.gsea.all.wide)
+```
+
+
+```{r specify sens and sup sets}
+
+
+sens.list <- c("MUS019_CT2A-OVA_Ctrl-T19_vs_CTL-T19_down", 
+               "MUS021_CT2A-OVA_Ctrl-T29_vs_NK-T29_down", 
+               "MUS022_CT2A-OVA-Ctrl-T21_vs_BV2-T21_down", 
+               "MUS022_CT2A-OVA_Ctrl-T21_vs_RAW2647-T21_down",
+               "MUS028_CT2A_Ctrl-T27_vs_J774-aCD29-T27_down",
+               "MUS031_CT2A_Ctrl-T31_vs_J774-aCD9-T31_down",
+               "MUS031_CT2A_Ctrl-T31_vs_J774-T31_down"
+               )
+
+macro.sens <- c(
+               "MUS022_CT2A-OVA_Ctrl-T21_vs_RAW2647-T21_down",
+               "MUS031_CT2A_Ctrl-T31_vs_J774-T31_down"
+               )
+
+
+supp.list <- c("MUS019_CT2A-OVA_Ctrl-T19_vs_CTL-T19_up",
+               "MUS022_CT2A-OVA-Ctrl-T21_vs_BV2-T21_up", 
+               "MUS021_CT2A-OVA_Ctrl-T29_vs_NK-T29_up",
+               "MUS031_CT2A_Ctrl-T31_vs_J774-T31_up",
+               "MUS031_CT2A_Ctrl-T31_vs_J774-aCD9-T31_up",
+               "MUS028_CT2A_Ctrl-J774-T27_vs_J774-aCD29-T27_up",
+               "MUS022_CT2A-OVA_Ctrl-T21_vs_RAW2647-T21_up")
+
+
+hg.res.suppresor <- runHG(gene.list = gs.list[supp.list], gene.universe = unique(df.limma$gene), species = "Mm", 
+      my.pathway = master.list, my.pathway.representation = "SYMBOL", e2s = T )
+
+hg.res.suppresor.sum <- summarizeHG(hg.res.suppresor, fdr.threshold = 0.2)
+
+
+hg.res.suppresor.sum$plots
+```
+
+
+```{r tally counts}
+
+# Myeloid Sensitizers ##########################################################
+sens.myeloid <- c(
+               "MUS022_CT2A-OVA-Ctrl-T21_vs_BV2-T21_down",
+               "MUS022_CT2A-OVA_Ctrl-T21_vs_RAW2647-T21_down",
+               "MUS031_CT2A_Ctrl-T31_vs_J774-T31_down"
+               )
+
+
+sens.phag.myeloid <- c(
+               "MUS028_CT2A_Ctrl-T27_vs_J774-aCD29-T27_down",
+               "MUS031_CT2A_Ctrl-T31_vs_J774-aCD9-T31_down"
+               )
+
+df.tally.myeloid.nonphag <- data.frame(table(unlist(gs.list[sens.myeloid])))
+df.tally.myeloid.phag <- data.frame(table(unlist(gs.list[sens.phag.myeloid])))
+
+
+df.tally.nonphag.sum <- df.tally.myeloid.nonphag %>% 
+  dplyr::group_by(Freq) %>%
+  dplyr::summarize(n = length(Freq))
+
+df.tally.phag.sum <- df.tally.myeloid.phag %>% 
+  dplyr::group_by(Freq) %>%
+  dplyr::summarize(n = length(Freq))
+
+
+p1 <- df.tally.nonphag.sum %>%
+  ggplot(aes(x = Freq, y = n, fill = Freq)) + 
+  geom_bar(stat = "identity", color = "black") + 
+  scale_fill_gradient(low = "white", high = "black") + 
+  theme_miko() + labs(title = "non-phagocyte", subtitle = "sensitizer")
+p1 
+
+p2 <- df.tally.phag.sum %>%
+  ggplot(aes(x = Freq, y = n, fill = Freq)) + 
+  geom_bar(stat = "identity", color = "black") + 
+  scale_fill_gradient(low = "white", high = "black") + 
+  theme_miko() + labs(title = "phagocyte", subtitle = "sensitizer")
+p2
+
+
+# Myeloid Suppressors ##########################################################
+supp.myeloid <- c(
+               "MUS022_CT2A-OVA-Ctrl-T21_vs_BV2-T21_up",
+               "MUS022_CT2A-OVA_Ctrl-T21_vs_RAW2647-T21_up",
+               "MUS031_CT2A_Ctrl-T31_vs_J774-T31_up"
+               )
+
+supp.phag.myeloid <- c(
+               "MUS028_CT2A_Ctrl-T27_vs_J774-aCD29-T27_up",
+               "MUS031_CT2A_Ctrl-T31_vs_J774-aCD9-T31_up"
+               )
+
+df.tally.myeloid.nonphag.supp <- data.frame(table(unlist(gs.list[supp.myeloid])))
+df.tally.myeloid.phag.supp <- data.frame(table(unlist(gs.list[supp.phag.myeloid])))
+
+
+df.tally.nonphag.supp.sum <- df.tally.myeloid.nonphag.supp %>% 
+  dplyr::group_by(Freq) %>%
+  dplyr::summarize(n = length(Freq))
+
+df.tally.phag.supp.sum <- df.tally.myeloid.phag.supp %>% 
+  dplyr::group_by(Freq) %>%
+  dplyr::summarize(n = length(Freq))
+
+
+p3 <- df.tally.nonphag.supp.sum %>%
+  ggplot(aes(x = Freq, y = n, fill = Freq)) + 
+  geom_bar(stat = "identity", color = "black") + 
+  scale_fill_gradient(low = "white", high = "black") + 
+  theme_miko() + labs(title = "non-phagocyte", subtitle = "resistor")
+p3 
+
+p4 <- df.tally.phag.supp.sum %>%
+  ggplot(aes(x = Freq, y = n, fill = Freq)) + 
+  geom_bar(stat = "identity", color = "black") + 
+  scale_fill_gradient(low = "white", high = "black") + 
+  theme_miko() + labs(title = "phagocyte", subtitle = "resistor")
+p4
+
+ppool <- cowplot::plot_grid(p1, p2, p3, p4)
+
+# savePDF("macro_brj_tallies_060823.pdf", ppool)
+
+```
+
+
+```{r non-phag vs. phag enrichment}
+
+min.threshold.n <- 1
+myeloid.sens.list.gene <- list(
+  myeloid_non_phag = as.character(df.tally.myeloid.nonphag$Var1[df.tally.myeloid.nonphag$Freq > min.threshold.n]),
+  myeloid_phag = as.character(df.tally.myeloid.phag$Var1[df.tally.myeloid.phag$Freq >min.threshold.n]),
+  t_cell = gs.list[["MUS019_CT2A-OVA_Ctrl-T19_vs_CTL-T19_down"]],
+  nk_cell = gs.list[["MUS021_CT2A-OVA_Ctrl-T29_vs_NK-T29_down"]]
+)
+
+myeloid.supp.list.gene <- list(
+  myeloid_non_phag = as.character(df.tally.myeloid.nonphag.supp$Var1[df.tally.myeloid.nonphag.supp$Freq > min.threshold.n]),
+  myeloid_phag = as.character(df.tally.myeloid.phag.supp$Var1[df.tally.myeloid.phag.supp$Freq >min.threshold.n]),
+  t_cell = gs.list[["MUS019_CT2A-OVA_Ctrl-T19_vs_CTL-T19_up"]],
+  nk_cell = gs.list[["MUS021_CT2A-OVA_Ctrl-T29_vs_NK-T29_up"]]
+)
+
+# setd
+setdiff(myeloid.sens.list.gene$myeyloid_non_phag, myeloid.sens.list.gene$myeloid_phag)
+setdiff(myeloid.sens.list.gene$myeloid_phag, myeloid.sens.list.gene$myeyloid_non_phag)
+
+ggVennDiagram::ggVennDiagram(myeloid.sens.list.gene)
+ggVennDiagram::ggVennDiagram(myeloid.supp.list.gene)
+
+lintersect(myeloid.sens.list.gene)
+myeloid.supp.list.gene
+
+# write.csv(namedList2wideDF(myeloid.sens.list.gene), file = "Reboot12_sensitizer_hit_list_100224.csv")
+# write.csv(namedList2wideDF(myeloid.supp.list.gene), file = "Reboot12_suppressor_hit_list_100224.csv")
+
+```
+```{r phag vs. non_phag, fig.width=20, fig.height=20}
+
+which.pathway <- "Bader"
+
+myeloid.spec.sens.gs.list <- list(
+ non_phag_specific = setdiff(myeloid.sens.list.gene$myeloid_non_phag, myeloid.sens.list.gene$myeloid_phag),
+ common = intersect(myeloid.sens.list.gene$myeloid_non_phag, myeloid.sens.list.gene$myeloid_phag),
+ phag_specific = setdiff(myeloid.sens.list.gene$myeloid_phag, myeloid.sens.list.gene$myeloid_non_phag)
+)
+
+myeloid.spec.supp.gs.list <- list(
+ non_phag_specific = setdiff(myeloid.supp.list.gene$myeloid_non_phag, myeloid.supp.list.gene$myeloid_phag),
+ common = intersect(myeloid.supp.list.gene$myeloid_non_phag, myeloid.supp.list.gene$myeloid_phag),
+ phag_specific = setdiff(myeloid.supp.list.gene$myeloid_phag, myeloid.supp.list.gene$myeloid_non_phag)
+)
+
+do.e2s <- T
+myeloid.specific.sens <- runHG(gene.list = myeloid.spec.sens.gs.list, gene.universe = unique(df.limma$gene), species = "Mm",
+                          pathway.db = which.pathway, e2s = do.e2s)
+myeloid.specific.supp <- runHG(gene.list = myeloid.spec.supp.gs.list, gene.universe = unique(df.limma$gene), species = "Mm",
+                          pathway.db = which.pathway, e2s = do.e2s)
+
+myeloid.specific.sens.res <- summarizeHG(hg.res = myeloid.specific.sens, show.n = 10)
+myeloid.specific.sens.res$plots
+
+myeloid.specific.supp.res <- summarizeHG(hg.res = myeloid.specific.supp, show.n = 10)
+myeloid.specific.supp.res$plots
+
+df.sens.myeloid <- myeloid.specific.sens.res$results
+df.sens.myeloid$overlapGenes <- unlist(lapply(df.sens.myeloid$overlapGenes, function(x){paste0(unlist(x), collapse = ", ")}))
+df.sens.myeloid.gs <- namedList2wideDF(myeloid.spec.sens.gs.list)
+write.csv(df.sens.myeloid.gs, file = "genelist_myeloid_sensitizers_030823.csv")
+write.csv(df.sens.myeloid, file = "functional_enrichment_myeloid_sensitizers_030823.csv")
+
+df.supp.myeloid <- myeloid.specific.supp.res$results
+df.supp.myeloid$overlapGenes <- unlist(lapply(df.supp.myeloid$overlapGenes, function(x){paste0(unlist(x), collapse = ", ")}))
+df.supp.myeloid.gs <- namedList2wideDF(myeloid.spec.supp.gs.list)
+write.csv(df.supp.myeloid.gs, file = "genelist_myeloid_suppressor_030823.csv")
+write.csv(df.supp.myeloid, file = "functional_enrichment_myeloid_suppressor_030823.csv")
+
+df.enrich.non_phag <- myeloid.specific.sens.res$results
+hg.net.myeloid_sets.sens <- netHG(hg.res = myeloid.specific.sens, gene.list = myeloid.spec.sens.gs.list, species = "Mm", 
+                             fdr.filter = 0.2, 
+                   edge.threshold = 0.25, cex_line = 0.2, pie = "Count", verbose = T)
+
+plt.myeloid.sens.strat <- hg.net.myeloid_sets.sens$net.plot.nolabel
+plt.myeloid.sens.strat
+
+# savePDF("myeloid_sensitiziers_enrichnet_nolabel_030823.pdf",plt.myeloid.sens.strat , fig.width=20, fig.height=20)
+# hg.net.myeloid_sets.supp$net.plot.label
+
+
+```
+
+
+```{r annotate pathways}
+
+min.threshold.n <- 1
+myeloid.sens.list.gene <- list(
+  t_cell = gs.list[["MUS019_CT2A-OVA_Ctrl-T19_vs_CTL-T19_down"]],
+  nk_cell = gs.list[["MUS021_CT2A-OVA_Ctrl-T29_vs_NK-T29_down"]]
+)
+
+myeloid.supp.list.gene <- list(
+  t_cell = gs.list[["MUS019_CT2A-OVA_Ctrl-T19_vs_CTL-T19_up"]],
+  nk_cell = gs.list[["MUS021_CT2A-OVA_Ctrl-T29_vs_NK-T29_up"]]
+)
+
+which.pathway <- "Bader"
+
+hg.res.myeloid.suppresor <- runHG(gene.list = myeloid.supp.list.gene, gene.universe = unique(df.limma$gene), species = "Mm",
+                          pathway.db = which.pathway, e2s = T)
+hg.res.myeloid.sensitizer <- runHG(gene.list = myeloid.sens.list.gene, gene.universe = unique(df.limma$gene), species = "Mm", 
+                          pathway.db =  which.pathway, e2s = T)
+
+hg.res.myeloid.suppresor.sum <- summarizeHG(hg.res.myeloid.suppresor, show.n = 10)
+hg.res.myeloid.sensitizer.sum <- summarizeHG(hg.res.myeloid.sensitizer, show.n = 10)
+
+hg.res.myeloid.suppresor.sum$plots
+hg.res.myeloid.sensitizer.sum$plots
+```
+
+
+
+```{r enrichment maps for select genesets, fig.width=20, fig.height=20}
+
+fdr.threshold <- 2 # best: 0.2
+
+hg.net.myeloid.sens <- netHG(hg.res = hg.res.myeloid.sensitizer, gene.list = myeloid.sens.list.gene, species = "Mm", 
+                             fdr.filter = fdr.threshold, 
+                   edge.threshold = 0.25, cex_line = 0.2, pie = "Count", verbose = T)
+
+hg.net.myeloid.supp <- netHG(hg.res = hg.res.myeloid.suppresor, gene.list = myeloid.supp.list.gene, species = "Mm", 
+                             fdr.filter = fdr.threshold, 
+                   edge.threshold = 0.25, cex_line = 0.2, pie = "Count", verbose = T)
+
+plt.net.myeloid.sens <- hg.net.myeloid.sens$net.plot.label
+plt.net.myeloid.supp <- hg.net.myeloid.supp$net.plot.label
+
+plt.net.myeloid.sens <- hg.net.myeloid.sens$net.plot.nolabel
+plt.net.myeloid.supp <- hg.net.myeloid.supp$net.plot.nolabel
+
+# plt.net.supp
+plt.net.myeloid.sens
+plt.net.myeloid.supp
+
+# savePDF("enrichment_network_suppressors_GO_140623.pdf", plt.net.supp, fig.width=20, fig.height=20 )
+# savePDF("enrichment_network_sensitizers_GO_140623.pdf", plt.net.sens, fig.width=20, fig.height=20 )
+
+
+# savePDF("enrichment_network_suppressors_nolabeled_020823.pdf", plt.net.myeloid.sens, fig.width=20, fig.height=20 )
+# savePDF("enrichment_network_sensitizers_nolabeled_020823.pdf", plt.net.myeloid.supp, fig.width=20, fig.height=20 )
+
+```
+
+
+
+
+```{r Atg genes, fig.width=14, fig.height=6}
+
+screen.select <- c("MUS019_CT2A-OVA_Ctrl-T19_vs_CTL-T19",
+               "MUS022_CT2A-OVA-Ctrl-T21_vs_BV2-T21", 
+               "MUS021_CT2A-OVA_Ctrl-T29_vs_NK-T29",
+               "MUS031_CT2A_Ctrl-T31_vs_J774-T31",
+               "MUS031_CT2A_Ctrl-T31_vs_J774-aCD9-T31",
+               "MUS028_CT2A_Ctrl-J774-T27_vs_J774-aCD29-T27",
+               "MUS022_CT2A-OVA_Ctrl-T21_vs_RAW2647-T21")
+
+df.limma.atg <- df.limma %>% dplyr::filter( gene %in% c('Atg3', 'Atg7', 'Atg5', 
+                                                        'Atg10', 'Atg9a', 'Atg101', 'Atg12', 'Atg14'), 
+                                            sample %in% screen.select)
+
+df.limma.sub <- df.limma %>% dplyr::filter(sample %in% screen.select)
+
+df.limma.atg %>%
+  ggplot(aes(x = z, y = gene)) + 
+  geom_point() + 
+  facet_wrap(~sample, nrow = 2) + 
+  theme_miko() + 
+  geom_vline(xintercept = 0) + 
+  geom_vline(xintercept = -1.96, linetype = "dashed")
+
+df.limma.atg %>%
+  ggplot(aes(x = sample, y = gene, color = z)) + 
+  geom_point(size = 3) +
+  # facet_wrap(~sample, nrow = 2) + 
+  theme_miko() + 
+  geom_vline(xintercept = 0) + 
+  geom_vline(xintercept = -1.96, linetype = "dashed") + 
+  scale_color_miko()
+
+```
+
+```{r compare core, fig.height=8, fig.width=8}
+
+corectl.list <- geneSets[["coreCTL"]]
+
+compareCTL.list <- list(
+  common = intersect(gs.list[['MUS019_CT2A-OVA_Ctrl-T19_vs_CTL-T19_down']], corectl.list$Sensitizer),
+  glioma_unique = setdiff(gs.list[['MUS019_CT2A-OVA_Ctrl-T19_vs_CTL-T19_down']], corectl.list$Sensitizer),
+  core_unique = setdiff(corectl.list$Sensitizer, gs.list[['MUS019_CT2A-OVA_Ctrl-T19_vs_CTL-T19_down']])
+)
+compareCTL.supp.list <- list(
+  common = intersect(gs.list[['MUS019_CT2A-OVA_Ctrl-T19_vs_CTL-T19_up']], corectl.list$Supressor),
+  glioma_unique = setdiff(gs.list[['MUS019_CT2A-OVA_Ctrl-T19_vs_CTL-T19_up']], corectl.list$Supressor),
+  core_unique = setdiff(corectl.list$Supressor, gs.list[['MUS019_CT2A-OVA_Ctrl-T19_vs_CTL-T19_up']])
+)
+
+hg.res.core <- runHG(gene.list = compareCTL.list, gene.universe = unique(df.limma$gene), species = "Mm", e2s = T)
+hg.res.supp.core <- runHG(gene.list = compareCTL.supp.list, gene.universe = unique(df.limma$gene), species = "Mm", e2s = T)
+
+hg.res.core.sum <- summarizeHG(hg.res.core, show.n = 15)
+hg.res.core.supp.sum <- summarizeHG(hg.res.supp.core, show.n = 15)
+
+hg.res.core.sum$plots
+hg.res.core.supp.sum$plots
+
+plt.venn.sensitizer <- ggVennDiagram::ggVennDiagram(list(
+  ct2a = gs.list[['MUS019_CT2A-OVA_Ctrl-T19_vs_CTL-T19_down']],
+  core = corectl.list$Sensitizer
+)) + labs(title = "Sensitizer Overlap")
+
+plt.venn.resistor <- ggVennDiagram::ggVennDiagram(list(
+  ct2a = gs.list[['MUS019_CT2A-OVA_Ctrl-T19_vs_CTL-T19_up']],
+  core = corectl.list$Supressor
+)) + labs(title = "Resistor Overlap")
+
+ggVennDiagram::ggVennDiagram(compareCTL.supp.list)
+
+hg.net.core.sens <- netHG(hg.res = hg.res.core, gene.list = compareCTL.list, species = "Mm", 
+                             fdr.filter = 0.2, 
+                   edge.threshold = 0.25, cex_line = 1, pie = "Count", verbose = T)
+hg.net.core.supp <- netHG(hg.res = hg.res.supp.core, gene.list = compareCTL.supp.list, species = "Mm", 
+                             fdr.filter = 0.2, 
+                   edge.threshold = 0.25, cex_line = 1, pie = "Count", verbose = T)
+
+plt.net.core.sens <- hg.net.core.sens$net.plot.label
+plt.net.core.sens_nolabel <- hg.net.core.sens$net.plot.nolabel
+plt.net.core.sens
+
+plt.net.core.supp <- hg.net.core.supp$net.plot.label
+plt.net.core.supp_nolabel <- hg.net.core.supp$net.plot.nolabel
+plt.net.core.supp
+
+df.core.sens.terms <- hg.res.core.sum$results
+df.core.sens.terms$overlapGenes <- unlist(lapply(df.core.sens.terms$overlapGenes, function(x){paste0(unlist(x), collapse = ", ")}))
+
+df.core.supp.terms <- hg.res.core.supp.sum$results
+df.core.supp.terms$overlapGenes <- unlist(lapply(df.core.supp.terms$overlapGenes, function(x){paste0(unlist(x), collapse = ", ")}))
+
+# write.csv(x = namedList2wideDF(compareCTL.list), "reboot12_genelist_core_vs_ct2a_sensitizers_060823.csv")
+# write.csv(x = df.core.sens.terms, file = "reboot12_core_vs_glioma_enrichmentTerms_sensitizers_060823.csv")
+# savePDF("reboot12_core_vs_glioma_sensitizer_vennDiagram.pdf", plt.venn.sensitizer, fig.height=8, fig.width=8)
+# savePDF("reboot12_core_vs_glioma_netEnrich_sensitizers_labeled_060823.pdf", plt.net.core.sens, fig.height=8, fig.width=8)
+# savePDF("reboot12_core_vs_glioma_netEnrich_sensitizers_unlabeled_060823.pdf", plt.net.core.sens_nolabel, fig.height=8, fig.width=8)
+# 
+# write.csv(x = namedList2wideDF(compareCTL.supp.list), "reboot12_genelist_core_vs_ct2a_resistors_060823.csv")
+# write.csv(x = df.core.supp.terms, file = "reboot12_core_vs_glioma_enrichmentTerms_resistors_060823.csv")
+# savePDF("reboot12_core_vs_glioma_resistor_vennDiagram.pdf", plt.venn.resistor, fig.height=8, fig.width=8)
+# savePDF("reboot12_core_vs_glioma_netEnrich_resistors_labeled_060823.pdf", plt.net.core.supp, fig.height=8, fig.width=8)
+# savePDF("reboot12_core_vs_glioma_netEnrich_resistors_unlabeled_060823.pdf", plt.net.core.supp_nolabel, fig.height=8, fig.width=8)
+
+```
+
+
+```{r ROC plots - LAweson core evasion gene recovery}
+
+ess.thresh <- 1.96
+core.sens <- corectl.list$Sensitizer
+core.supp <- corectl.list$Supressor
+df.limma.current <- df.limma %>% dplyr::filter(sample %in% "MUS019_CT2A-OVA_Ctrl-T19_vs_CTL-T19")
+
+g2bf <- df.limma.current$z
+names(g2bf) <- (df.limma.current$gene)
+# START HERE #########################################
+
+n.length <- 1000
+min.bf <- min(df.limma.current$z, na.rm = T)
+max.bf <- max(df.limma.current$z, na.rm = T)
+bin.width <- (max.bf - min.bf)/n.length
+
+all.thresholds <- 0 # 5
+for (i in 1:n.length){
+   all.thresholds <- c(all.thresholds, min.bf + (i*bin.width))
+}
+all.thresholds <- all.thresholds[order(all.thresholds)]
+
+library(caret)
+
+df.ct2a.roc <- df.ct2a.supp.roc <- NULL
+for (i in 1:length(all.thresholds)){
+  
+  current.threshold <- all.thresholds[i]
+
+  try({
+    df.pred.obs <- data.frame(
+       truth = df.limma.current$gene %in% core.sens,
+      observed = df.limma.current$z < current.threshold
+    )
+    df.pred.obs <- df.pred.obs[complete.cases(df.pred.obs), ]
+    table(df.pred.obs$truth, df.pred.obs$observed)
+    cm.res <- confusionMatrix(table(df.pred.obs$observed, df.pred.obs$truth), pos = "TRUE")
+    df.ct2a.roc <- bind_rows(df.ct2a.roc, 
+                        data.frame(
+                          threshold = current.threshold,
+                          accuracy = mean(df.pred.obs$observed == df.pred.obs$truth),
+                          error = mean(df.pred.obs$observed != df.pred.obs$truth),
+                          sensitivity = cm.res[["byClass"]][["Sensitivity"]],
+                          specificity = cm.res[["byClass"]][["Specificity"]],
+                          precision = cm.res[["byClass"]][["Precision"]],
+                          recall = cm.res[["byClass"]][["Recall"]]
+                        ))
+  })
+  
+    # CT2A OTHER
+  try({
+    df.pred.obs <- data.frame(
+       truth = df.limma.current$gene %in% core.supp,
+      observed = df.limma.current$z > current.threshold
+    )
+    df.pred.obs <- df.pred.obs[complete.cases(df.pred.obs), ]
+    table(df.pred.obs$truth, df.pred.obs$observed)
+    cm.res <- confusionMatrix(table(df.pred.obs$observed, df.pred.obs$truth), pos = "TRUE")
+    df.ct2a.supp.roc <- bind_rows(df.ct2a.supp.roc, 
+                        data.frame(
+                          threshold = current.threshold,
+                          accuracy = mean(df.pred.obs$observed == df.pred.obs$truth),
+                          error = mean(df.pred.obs$observed != df.pred.obs$truth),
+                          sensitivity = cm.res[["byClass"]][["Sensitivity"]],
+                          specificity = cm.res[["byClass"]][["Specificity"]],
+                          precision = cm.res[["byClass"]][["Precision"]],
+                          recall = cm.res[["byClass"]][["Recall"]]
+                        ))
+  })
+
+}
+
+simple_auc <- function(TPR, FPR){
+  dFPR <- c(diff(FPR), 0)
+  dTPR <- c(diff(TPR), 0)
+  sum(TPR * dFPR) + sum(dTPR * dFPR)/2
+}
+
+append0 <- function(x){
+    x <- bind_rows(x,
+                  data.frame(
+                    threshold = min(x$threshold)-1,
+                    accuracy = NA,
+                    error = NA,
+                    sensitivity = 1,
+                    specificity = 0,
+                    recall = 1,
+                    precision = 0
+                  ))
+    
+    x <- x %>% dplyr::arrange(threshold)
+    return(x)
+}
+
+append1 <- function(x){
+    x <- bind_rows(x,
+                  data.frame(
+                    threshold = min(x$threshold)-1,
+                    accuracy = NA,
+                    error = NA,
+                    sensitivity = 0,
+                    specificity = 1,
+                    recall = 0,
+                    precision = 1
+                  ))
+    
+    x <- x %>% dplyr::arrange(threshold)
+    return(x)
+}
+
+df.ct2a.roc <- append1(df.ct2a.roc)
+df.ct2a.supp.roc <- append0(df.ct2a.supp.roc)
+
+ct2a.auc.val <- signif(with(df.ct2a.roc, simple_auc(sensitivity, specificity)), 3)
+ct2a.auc.val.supp <- signif(with(df.ct2a.supp.roc, simple_auc(sensitivity, specificity)), 3)
+
+ct2a.auprc.val <- signif(with(df.ct2a.roc, simple_auc(precision, 1-recall)), 3)
+ct2a.auprc.val.supp <- signif(with(df.ct2a.supp.roc, simple_auc(precision, 1-recall)), 3)
+
+df.ct2a.roc$recovery.type <- "sensitizers"
+df.ct2a.supp.roc$recovery.type <- "resistors"
+df.roc.ct2a <- bind_rows(df.ct2a.roc, df.ct2a.supp.roc)
+
+plt.ct2a.roc <- df.roc.ct2a %>%
+  ggplot(aes(x = 1-specificity, y = sensitivity, color = recovery.type)) + 
+  geom_line() + 
+  geom_abline(linetype = "dashed") + 
+  theme_miko(grid = F, legend = T)
+
+plt.ct2a.pr <- df.roc.ct2a %>%
+  ggplot(aes(x = recall, y = precision, color = recovery.type)) + 
+  geom_line() + 
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  ylim(c(0,1)) + 
+  theme_miko(grid = F, legend = T)
+
+plt.ct2a.roc
+plt.ct2a.pr
+
+# savePDF("CT2A_ctl_AUROC_060823.pdf", plt.ct2a.roc, fig.width = 7, fig.height = 5)
+# savePDF("CT2A_ctl_AUPRC_060823.pdf", plt.ct2a.pr, fig.width = 7, fig.height = 5)
+
+```
+
+```{r differential TNF and IFN signaling}
+  so.all <- readRDS("SET7_tumorOnly_invitro_invivo_Reboot5_160622.rds")
+  so.invitro <- so.all$invitro
+  so.invivo <- so.all$invivo
+  so.gl261 <- so.all$gl261
+  so.ct2a <- so.all$ct2a
+  rm(so.all); gc()
+  
+  cluster.UMAP(so.invivo)
+  
+
+```
+
+
+
+
+```{r define suppressor/sensitizer genesets}
+
+  cluster.UMAP(so.ct2a, group.by = "SCT_snn_res.0.8")
+
+min.threshold.n <- 1
+myeloid.sens.list.gene <- list(
+  sens_myeloid_non_phag = as.character(df.tally.myeloid.nonphag$Var1[df.tally.myeloid.nonphag$Freq > min.threshold.n]),
+  sens_myeloid_phag = as.character(df.tally.myeloid.phag$Var1[df.tally.myeloid.phag$Freq >min.threshold.n]),
+  sens_t_cell = gs.list[["MUS019_CT2A-OVA_Ctrl-T19_vs_CTL-T19_down"]],
+  sens_nk_cell = gs.list[["MUS021_CT2A-OVA_Ctrl-T29_vs_NK-T29_down"]]
+)
+
+myeloid.supp.list.gene <- list(
+  supp_myeloid_non_phag = as.character(df.tally.myeloid.nonphag.supp$Var1[df.tally.myeloid.nonphag.supp$Freq > min.threshold.n]),
+  supp_myeloid_phag = as.character(df.tally.myeloid.phag.supp$Var1[df.tally.myeloid.phag.supp$Freq >min.threshold.n]),
+  supp_t_cell = gs.list[["MUS019_CT2A-OVA_Ctrl-T19_vs_CTL-T19_up"]],
+  supp_nk_cell = gs.list[["MUS021_CT2A-OVA_Ctrl-T29_vs_NK-T29_up"]]
+)
+
+ulength(unlist(myeloid.sens.list.gene))
+ulength(unlist(myeloid.supp.list.gene))
+
+all.evasion.list <- c(myeloid.sens.list.gene,myeloid.supp.list.gene )
+
+all.evasion.gene <- unique(c(unlist(myeloid.sens.list.gene), unlist(myeloid.supp.list.gene)))
+
+
+```
+
+
+```{r NMF evasion discovery - 1}
+
+  getNMFGenes.dev <- function(feature.loading, norm.cutoff = 0.5, n.cutoff = NA){
+    
+    if (!("matrix" %in% class(feature.loading))) stop("feature.loading input is not a matrix")
+    
+    nmf.kme <- t(feature.loading)
+    nmf.kme <- (apply(nmf.kme, 2, function(x) ((x^2)/sum(x^2))))
+    
+    # get module genes
+    if (!is.na(n.cutoff)){
+      module.genes <-  apply(nmf.kme, 1, function(x) colnames(nmf.kme)[order(-x)][1:n.cutoff])
+      module.genes <-  wideDF2namedList(module.genes)
+    } else {
+      module.genes <-  apply(nmf.kme, 1, function(x) colnames(nmf.kme)[x>norm.cutoff])
+    }
+    
+    module.size <- unlist(lapply(module.genes, length))
+    nmf.module.genes <- module.genes[module.size > 0]
+    
+    return(nmf.module.genes)
+  }
+  
+
+normData <- function(so.list, do.filter = T, do.filter.only = F){
+  
+  if (do.filter){
+    so.list <- pbapply::pblapply(X = so.list, FUN = function(x){
+      x <- getMitoContent(x)
+      x <- x[ ,x@meta.data$percent.mt < 10]
+      x <- x[ ,x@meta.data$nFeature_RNA < 9000]
+      x <- x[ ,x@meta.data$nFeature_RNA > 200]
+      return(x)
+    })
+    
+    
+    so.list <- so.list[unlist(lapply(so.list, ncol)) > 50]
+  }
+  
+
+  if (!do.filter.only){
+      so.list <- pbapply::pblapply(X = so.list, FUN = function(x){
+    var2reg <- "percent.mt"
+    object = x
+    object <- tryCatch({
+      SCTransform(object, method = "glmGamPoi", verbose =F, vst.flavor = "v2", 
+                  vars.to.regress = var2reg, variable.features.n = 2000)
+    }, error = function(e){
+      object <- SCTransform(object, method = "glmGamPoi", verbose =F, 
+                            vars.to.regress = var2reg, variable.features.n = 2000)  
+      return(object)
+    }, silent = T)
+  })
+  }
+  
+  return(so.list)
+
+  
+}
+
+
+```
+
+
+
+
+```{r NMF discovery - 2}
+
+redo.nmf <- F
+
+  if (redo.nmf){
+    
+so.list <- SplitObject(object = so.ct2a, split.by = "Barcode")
+so.list <- normData(so.list)
+
+
+all.eva <- unique(c( unique(unlist(myeloid.supp.list.gene)),  unique(unlist(myeloid.sens.list.gene))))
+
+library(NNLM)
+
+for (i in 1:length(so.list)){
+
+  expr.gene <- getExpressedGenes(so.list[[i]], min.pct = 0.05)
+  expr.gene <- expr.gene[expr.gene %in% unique(unlist(myeloid.supp.list.gene))]
+  so.list[[i]] <- GetResidual(so.list[[i]], features = expr.gene, assay = "SCT")
+  
+  emat <- so.list[[names(so.list)[i]]]@assays[["SCT"]]@scale.data
+  emat <- emat[rownames(emat) %in% expr.gene, ]
+  so.list[[names(so.list)[i]]]@assays[["SCT"]]@scale.data <-emat
+  so.list[[names(so.list)[i]]]@assays[["SCT"]]@var.features <- rownames(emat)
+  
+}
+
+nmf.res.list <- list()
+
+for (j in 1:length(so.list)){
+  
+  current.sample <- names(so.list)[j]
+  miko_message(current.sample)
+  object <- so.list[[current.sample]]
+  
+  # prep expression matrix 
+  expr.mat <- object@assays[["SCT"]]@scale.data
+  
+  # pos.mat <- expr.mat
+  expr.mat[expr.mat < 0] <- 0
+  
+  k.ranks <- 2:15 # 2:12
+  
+  if (length(k.ranks) > 18){
+    cl <- parallel::makeCluster(18)
+  } else {
+    cl <- parallel::makeCluster(length(k.ranks))
+  }
+  
+  doParallel::registerDoParallel(cl)
+  
+  nmf.model.list <- foreach(ind = 1:length(k.ranks), .packages = c("dplyr", "NNLM", "NMF"))  %dopar% {
+    z <- nnmf(expr.mat, k.ranks[ind], verbose = FALSE, check.k = F)
+    return((nmfModel(H=z$H, W = z$W)) )
+  }
+  
+  names(nmf.model.list) <- paste0(current.sample, "_k", k.ranks)
+
+  parallel::stopCluster(cl)
+  closeAllConnections();
+  gc();
+  
+  
+  nmf.gene.current <- list()
+  for (i in 1:length(nmf.model.list)){
+    nmf.name <- names(nmf.model.list)[i]
+    current.model <-  nmf.model.list[[nmf.name]]
+    current.genes <- getNMFGenes.dev(feature.loading = current.model@W, norm.cutoff = NA, n.cutoff = 50)
+    nmf.name2 <- gsub(paste0(current.sample, "_"), "", nmf.name)
+    names(current.genes) <- paste0(nmf.name2, "_", seq(1, as.numeric(gsub("k", "", nmf.name2))))
+    nmf.gene.current[[nmf.name]] <- current.genes
+  }
+  
+  nmf.gene.flat <- list()
+  
+  for (i in 1:length(nmf.gene.current)){
+    nmf.gene.flat <- c(nmf.gene.flat, nmf.gene.current[[i]])
+  }
+  
+  jmat.multi <- jaccardSimilarityMatrix(nmf.gene.flat)
+
+  nmf.res.list[[current.sample]] <- list(
+    sample = current.sample,
+    nmf =  nmf.model.list,
+    programs = nmf.gene.current,
+    programs.flat = nmf.gene.flat,
+    jmat = jmat.multi
+  )
+  
+}
+
+nmf.res.list.all <- nmf.res.list
+
+saveRDS(object = nmf.res.list.all, "NMF_ct2a_evasionGenes_141223.rds")
+  
+} else {
+
+  nmf.res.list.all <-  readRDS("NMF_ct2a_evasionGenes_141223.rds") ### THIS
+
+}
+
+```
+
+
+
+```{r NMF discovery - 3}
+
+nmf.res.list <- nmf.res.list.all
+all.samples <- names(nmf.res.list)
+# get nmf gene sets ############################
+top.n.genes <- 70 # 100
+top.norm.gene <- NA # 0.5
+for (j in 1:length(nmf.res.list)){
+  current.sample <- names(nmf.res.list)[j]
+  nmf.gene.current <- list()
+  nmf.model.list <- nmf.res.list[[current.sample]]$nmf
+  for (i in 1:length(nmf.model.list)){
+    nmf.name <- names(nmf.model.list)[i]
+    current.model <-  nmf.model.list[[nmf.name]]
+    current.genes <- getNMFGenes.dev(feature.loading = current.model@W, norm.cutoff = top.norm.gene, n.cutoff = top.n.genes)
+    nmf.name2 <- gsub(paste0(current.sample, "_"), "", nmf.name)
+    names(current.genes) <- paste0(nmf.name2, "_", seq(1, as.numeric(gsub("k", "", nmf.name2))))
+    nmf.gene.current[[nmf.name]] <- current.genes
+  }
+  
+  nmf.gene.flat <- list()
+  
+  for (i in 1:length(nmf.gene.current)){
+    nmf.gene.flat <- c(nmf.gene.flat, nmf.gene.current[[i]])
+  }
+  
+  nmf.res.list[[current.sample]]$programs <- nmf.gene.current
+  nmf.res.list[[current.sample]]$programs.flat <- nmf.gene.flat
+  
+}
+
+
+# ensure within sample robustness ##############################################
+
+intra.threshold <- 0.2 # 0.2
+nmf.gene.all <- list()
+for (i in 1:length(nmf.res.list)){
+  current.sample <- names(nmf.res.list)[i]
+  nmf.gene.flat <- nmf.res.list[[current.sample]]$programs.flat
+  
+  jmat.multi <- jaccardSimilarityMatrix(nmf.gene.flat)
+  jmat.multi.intra <- jmat.multi[apply(jmat.multi, 1, function(x){sum(x  > intra.threshold) > 1}), ]
+  
+  if (nrow(jmat.multi.intra) == 0) next
+  nmf.gene.robust <- nmf.gene.flat[rownames(jmat.multi.intra)]
+  names(nmf.gene.robust) <- paste0(current.sample, "_", names(nmf.gene.robust))
+  nmf.gene.all <- c(nmf.gene.all,nmf.gene.robust)
+
+}
+
+  jmat.all <- jaccardSimilarityMatrix(nmf.gene.all)
+  inter.threshold <- 0.5# 0.5
+  robust.inter <- apply(jmat.all, 1, function(x){rownames(jmat.all)[which(x  > inter.threshold)]})
+  
+  
+  robust.inter <- lapply(robust.inter, function(x) ulength(stringr::str_remove(x, "_k[0-9]*_[0-9]*")))
+  robust.programs <- names(robust.inter)[unlist(robust.inter) > 1]
+
+  nclust <- 2
+  
+  jmat.robust <- jmat.all[robust.programs, robust.programs]
+  
+  dmat.robust <- as.dist(DiffCorr::cor.dist(jmat.robust, methods = "pearson", absolute = FALSE))
+hmat.robust <- cutree(hclust(dmat.robust), k = nclust)
+
+df.program.ann <- data.frame(
+  program = rownames(jmat.robust),
+  cluster = paste0("nmf_", hmat.robust)
+)
+df.program.ann <- col2rowname(df.program.ann, "program")
+plt.hm <-  miko_heatmap(jmat.robust, cutree_col = nclust, cutree_row = nclust, show_colnames  = F,
+               clustering_distance_rows = "correlation",
+               clustering_distance_cols = "correlation",
+               border_color = NA, annotation_row = df.program.ann, annotation_col = df.program.ann)
+print(plt.hm)
+# savePDF("Reboot12_NMF_evasionModules_top70_intra02_inter05_ov05_240124.pdf", plt.hm, fig.width = 5, fig.height = 5)
+  
+  # get final gene programs #####################################################
+  
+uclust <- unique(hmat.robust)
+nmf.robust.list <- nmf.robust.final <- list()
+prev.thresh <- 0.5 # 0.5
+for (i in 1:length(uclust)){
+  
+  program.name <- paste0("G",  i)
+  nmf.robust.list[[program.name]] <- nmf.gene.all[rownames(jmat.robust)[hmat.robust %in% uclust[i]]]
+  n.programs <- length(nmf.robust.list[[program.name]])
+  df.tally <- data.frame(table(unlist(nmf.robust.list[[program.name]])))
+  df.tally$prop <- df.tally$Freq/n.programs
+  nmf.robust.final[[program.name]] <- as.character(df.tally$Var1[df.tally$prop > prev.thresh]) # vs. >=
+}
+
+do.hg <- F
+ gu <- rownames(so.ct2a)
+if (do.hg){
+  gu <- rownames(so.ct2a)
+hg.nmf <- runHG(gene.list = nmf.robust.final, gene.universe = gu, species = "Mm" )
+hg.nmf.sum <- summarizeHG(hg.nmf, show.n = 10)
+
+df.hg.bader <- hg.nmf.sum$results
+
+plt.hg <- cowplot::plot_grid(plotlist = lapply(hg.nmf.sum$plots, function(x){ x + scale_fill_gradient(low = "white", high = "black")}), 
+                             nrow = 1) 
+plt.hg
+# savePDF("Reboot12_NMF_sensitizer_enrichment_141223.pdf", plt.hg, fig.width = 8, fig.height = 4)
+}
+ 
+ nmf.robust.final <- nmf.robust.final[unlist(lapply(nmf.robust.final, length)) > 2]
+nmf.robust.final
+
+df.gene.list <- namedList2wideDF(nmf.robust.final)
+# write.csv(df.gene.list, file = "Reboot12_NMF_sensitizer_genes_141223.csv")
+length(unlist(nmf.robust.final))
+ulength(unlist(nmf.robust.final))
+
+lapply(nmf.robust.final, length)
+
+
+```
+
+
+
+```{r tally genes}
+
+all.evasion.genes <- unique(unlist(c(myeloid.supp.list.gene, myeloid.sens.list.gene)))
+nmf.count.set <- nmf.robust.final
+nmf.count.set$other <- all.evasion.genes[!(all.evasion.genes %in% unique(unlist(nmf.robust.final)))]
+
+df.gene.list.long <- namedList2longDF(nmf.count.set)
+colnames(df.gene.list.long) <- c("program", "feature")
+df.gene.list.long$is.supp <- df.gene.list.long$feature %in% unique(unlist(myeloid.supp.list.gene))
+df.gene.list.long$is.sens <- df.gene.list.long$feature %in% unique(unlist(myeloid.sens.list.gene))
+
+all.evasion.list <- c(myeloid.supp.list.gene, myeloid.sens.list.gene)
+
+all.evasion.list.g1 <- lapply(all.evasion.list, function(x){x[x %in% nmf.robust.final$G1]})
+all.evasion.list.g1 <- all.evasion.list.g1[unlist(lapply(all.evasion.list.g1, length)) > 0]
+
+all.evasion.list.g2 <- lapply(all.evasion.list, function(x){x[x %in% nmf.robust.final$G2]})
+all.evasion.list.g2 <- all.evasion.list.g2[unlist(lapply(all.evasion.list.g2, length)) > 0]
+
+try({
+  all.evasion.list.g3 <- lapply(all.evasion.list, function(x){x[x %in% nmf.robust.final$G3]})
+all.evasion.list.g3 <- all.evasion.list.g3[unlist(lapply(all.evasion.list.g3, length)) > 0]
+})
+
+
+upset.Plot(all.evasion.list.g1)
+upset.Plot(all.evasion.list.g2)
+
+try({
+  upset.Plot(all.evasion.list.g3)
+})
+
+df.gene.list.long$type <- "other"
+df.gene.list.long$type[df.gene.list.long$is.sens] <- "Sensitizer"
+df.gene.list.long$type[df.gene.list.long$is.supp] <- "Suppressor"
+df.gene.list.long$type[df.gene.list.long$is.sens & df.gene.list.long$is.supp] <- "Mixed"
+
+df.gene.list.tally <- data.frame(table(df.gene.list.long$program, df.gene.list.long$type))
+colnames(df.gene.list.tally) <- c("program", "type", "n")
+plt.tally <- df.gene.list.tally %>%
+  ggplot(aes(x = program, y = n, fill = type)) + 
+  geom_bar(stat = "identity" )
+
+plt.tally
+# savePDF("Reboot12_immune_gs_tally_240124.pdf", plt.tally)
+
+ulength(unlist(c(myeloid.supp.list.gene, myeloid.sens.list.gene)))
+ulength(unlist(c(myeloid.sens.list.gene)))
+ulength(unlist(c(myeloid.supp.list.gene)))
+
+ggVennDiagram::ggVennDiagram(nmf.count.set)
+
+
+lawson.compare.E1 <- list(
+  E1 = nmf.count.set$G1,
+  Lawson = unique(c(corectl.list$Supressor, corectl.list$Sensitizer, corectl.list$Supp_Sens))
+)
+
+lawson.compare <- list(
+  E1 = nmf.count.set$G1,
+  E2 = nmf.count.set$G2,
+  Lawson = unique(c(corectl.list$Supressor, corectl.list$Sensitizer, corectl.list$Supp_Sens))
+)
+
+ggVennDiagram::ggVennDiagram(lawson.compare)
+
+
+df.gene.list.save <- 
+bind_rows(
+  data.frame(
+  set = "E1",
+  gene = nmf.count.set$G1[order(nmf.count.set$G1)]
+), 
+data.frame(
+  set = "E2",
+  gene = nmf.count.set$G2[order(nmf.count.set$G2)]
+)
+
+)
+
+df.gene.list.save$is.lawson <- df.gene.list.save$gene %in%  unique(c(corectl.list$Supressor, corectl.list$Sensitizer, corectl.list$Supp_Sens))
+# write.csv( x =df.gene.list.save, file = "Reboot12_E1_E2_gene_list_080224.csv")
+
+```
+
+```{r score evasion phenotypes in CT2A cells}
+
+ms.evasion.ct2a <- runMS(object = so.ct2a, genelist = nmf.robust.final, scale = T) # , winsorize.quantiles = c(0.01, 0.99)
+ms.evasion.ct2a$plot.list
+
+evasion.eg <- eigengene(ms.evasion.ct2a$data[ ,c("G1", "G2")])
+df.umap <- getUMAP(object = so.ct2a)[["df.umap"]]
+
+df.umap$G1 <- ms.evasion.ct2a$data$G1
+df.umap$G2 <- ms.evasion.ct2a$data$G2
+df.umap$eigen <- evasion.eg
+
+df.umap %>%
+  ggplot(aes(x = G1, y = G2)) + 
+  geom_point(alpha = 0.1) + 
+  scale_fill_miko(mid = "grey95") + 
+  theme_miko() + 
+  theme(legend.position = "right") + 
+  geom_smooth(method= "lm", color = scales::muted("red")) + 
+  labs(x = "G1 Evasion", y = "G2 Evasion")
+
+cor(df.umap$G1, df.umap$G2, method = "spearman")
+
+df.umap %>%
+  arrange(abs(eigen)) %>%
+  ggplot(aes(x = x, y = y, color = eigen)) + 
+  geom_point(size = 1) + 
+  scale_color_miko() +
+  theme_miko() + labs(x = "UMAP1", y = "UMAP2") + 
+  theme_void() + theme(legend.position = "right")
+
+df.umap %>%
+  ggplot(aes(x = x, y = y, color = G1)) + 
+  geom_point(size = 1) + 
+  scale_color_miko() +
+  theme_miko() + labs(x = "UMAP1", y = "UMAP2") + 
+  theme_void() + theme(legend.position = "right")
+
+df.umap %>%
+  arrange(abs(G2)) %>%
+  ggplot(aes(x = x, y = y, color = G2)) + 
+  geom_point(size = 1) + 
+  scale_color_miko() +
+  theme_miko() + labs(x = "UMAP1", y = "UMAP2") + 
+  theme_void() + theme(legend.position = "right")
+
+```
+
+
+```{r score evasion phenotypes and visualize}
+
+so.ct2a@meta.data$sensitizer.class <- ms.evasion.ct2a$data$class.ms
+so.ct2a@meta.data$evasion_g1 <- ms.evasion.ct2a$data$G1
+so.ct2a@meta.data$evasion_g2 <- ms.evasion.ct2a$data$G2
+
+plt.dot <- DotPlot(object = so.ct2a, assay = "SCT", 
+                   features = unique(unlist(nmf.robust.final)), 
+                   scale = T,
+                   group.by = "sensitizer.class") + 
+  theme_miko() + 
+  scale_color_miko()
+
+
+plt.dot + coord_flip() + theme(legend.position = "right")
+
+ms.evasion.ct2a$data %>%
+  ggplot(aes(x= G1, y = G2)) + 
+  geom_point()
+
+ms.evasion.ct2a$plot.max.score
+ms.evasion.ct2a$plot.list
+
+pt.size <- 0.3
+which.option <- "A"
+which.direction <- -1
+p1 <- ms.evasion.ct2a$data %>%
+    dplyr::arrange(G1) %>%
+  ggplot(aes(x = x, y = y, color = G1)) +
+    geom_point(size = pt.size) +
+  viridis::scale_color_viridis() + 
+    theme_miko() + 
+    labs(color = "G1", title = "G1")
+
+p1
+
+p2 <- ms.evasion.ct2a$data %>%
+    dplyr::arrange(G2) %>%
+  ggplot(aes(x = x, y = y, color = G2)) +
+    geom_point(size = pt.size) +
+  viridis::scale_color_viridis() + 
+    theme_miko() + 
+    labs(color = "G2", title = "G2")
+
+cowplot::plot_grid(p1, p2)
+
+```
+
+```{r annotate evasion phenotypes, fig.width=5, fig.height=10}
+
+hg.evasion.res <- runHG(gene.list = nmf.robust.final, gene.universe = rownames(so.ct2a), species = "Mm", pathway.db  = "Bader", e2s=T)
+hg.evasion.sum <- summarizeHG(hg.evasion.res, show.n = 25)
+hg.evasion.sum$plots
+
+nmf.robust_bySign <- list(
+  G1_sensitizer = nmf.robust.final$G1[nmf.robust.final$G1 %in% unique(unlist(myeloid.sens.list.gene))],
+  G1_resister = nmf.robust.final$G1[nmf.robust.final$G1 %in% unique(unlist(myeloid.supp.list.gene))],
+  G2_sensitizier = nmf.robust.final$G2[nmf.robust.final$G2 %in% unique(unlist(myeloid.sens.list.gene))],
+  G2_resister = nmf.robust.final$G2[nmf.robust.final$G2 %in% unique(unlist(myeloid.supp.list.gene))]
+)
+
+# nmf.robust_bySign
+hg.evasion.res2 <- runHG(gene.list = nmf.robust_bySign, gene.universe = rownames(so.ct2a), species = "Mm", pathway.db  = "Bader", e2s=T)
+hg.evasion.sum2 <- summarizeHG(hg.evasion.res2, show.n = 25)
+hg.evasion.sum2$plots
+
+df.res <- hg.evasion.sum2$results
+df.res$gene <- unlist((df.res$overlapGenes))
+
+
+```
+
+```{r network enrichment evasion, fig.width=30, fig.height=30}
+
+# POOLED ####################################
+hg.net.evasion <- netHG(hg.res = hg.evasion.res, gene.list = nmf.robust.final, species = "Mm", 
+                             fdr.filter = 0.1, gene.universe =  rownames(so.ct2a),
+                   edge.threshold = 0.25, cex_line = 1, pie = "Count", verbose = T)
+
+plt.net.evasion_label <- hg.net.evasion$net.plot.label
+plt.net.evasion_nolabel <- hg.net.evasion$net.plot.nolabel
+
+plt.net.evasion_label <- plt.net.evasion_label + scale_fill_manual(values = c("G2" = "tomato", "G1" = "skyblue"))
+plt.net.evasion_nolabel <- plt.net.evasion_nolabel + scale_fill_manual(values = c("G2" = "tomato", "G1" = "skyblue"))
+
+plt.net.evasion_nolabel
+plt.net.evasion_label
+
+# savePDF("Reboot12_evasionNetwork_nolabel_Bader_260124.pdf", plt.net.evasion_nolabel, fig.width=20, fig.height=20)
+# savePDF("Reboot12_evasionNetwork_label_Bader_260124.pdf", plt.net.evasion_label, fig.width=20, fig.height=20)
+ # savePDF("Reboot12_evasionNetwork_test.pdf", plt.net.evasion_label, fig.width=20, fig.height=20)
+
+# BY SENSITIZER/SUPPRESSOR TYPE ####################################
+
+hg.net.evasion <- netHG(hg.res = hg.evasion.res2, gene.list = nmf.robust_bySign, species = "Mm", 
+                             fdr.filter = 0.2, gene.universe =  rownames(so.ct2a),
+                   edge.threshold = 0.25, cex_line = 1, pie = "Count", verbose = T)
+
+plt.net.evasion_label <- hg.net.evasion$net.plot.label
+plt.net.evasion_nolabel <- hg.net.evasion$net.plot.nolabel
+
+plt.net.evasion_nolabel
+plt.net.evasion_label
+
+# savePDF("Reboot12_evasionNetwork_stratified_02thresh_nolabel_Bader_260124.pdf", plt.net.evasion_nolabel, fig.width=20, fig.height=20)
+# savePDF("Reboot12_evasionNetwork_stratified_02_thresh_label_Bader_260124.pdf", plt.net.evasion_label, fig.width=20, fig.height=20)
+```
+
+```{r compare expression between two subsets}
+
+df.dot <- plt.dot[["data"]]
+
+df.dot$evasion_module <- NA
+df.dot$evasion_module[df.dot$features.plot %in% nmf.robust.final$G1] <- "G1"
+df.dot$evasion_module[df.dot$features.plot %in% nmf.robust.final$G2] <- "G2"
+df.dot$evasion_module[df.dot$features.plot %in% nmf.robust.final$G3] <- "G3"
+
+df.dot %>%
+  dplyr::group_by(id, evasion_module) %>%
+  dplyr::mutate(prank = rank(avg.exp)) %>%
+  ggplot(aes(x = prank, y = avg.exp)) + 
+  geom_point() + 
+  facet_wrap(~id + evasion_module)
+
+
+df.dot %>%
+  dplyr::group_by(id, evasion_module) %>%
+  dplyr::mutate(prank = rank(avg.exp)) %>%
+  ggplot(aes(x = id, y = (avg.exp))) + 
+  geom_boxplot() + 
+  facet_wrap(~evasion_module) + 
+  scale_y_log10()
+
+```
+```{r infer evasion phenotype states}
+
+  so.ct2a@meta.data$evasion_g1 <- ms.evasion.ct2a$data$G1
+so.ct2a@meta.data$evasion_g2 <- ms.evasion.ct2a$data$G2
+
+g1_state <- inferState(ms.evasion.ct2a$data$G1)
+g2_state <- inferState(ms.evasion.ct2a$data$G2, k = 2)
+
+ so.ct2a@meta.data$g1_state <- as.character(g1_state$class)
+  so.ct2a@meta.data$g2_state <- as.character(g2_state$class)
+  
+  cluster.UMAP(so.ct2a, "g1_state")
+  cluster.UMAP(so.ct2a, "g2_state")
+  
+  
+  so.ct2a@meta.data$consensus_evasion_state <- "other"
+  so.ct2a@meta.data$consensus_evasion_state[so.ct2a@meta.data$g1_state %in% 1 & so.ct2a@meta.data$g2_state %in% 2] <- "G1"
+  so.ct2a@meta.data$consensus_evasion_state[so.ct2a@meta.data$g2_state %in% 1 & so.ct2a@meta.data$g1_state %in% 2] <- "G2"
+  
+  cluster.UMAP(so.ct2a, "consensus_evasion_state")
+
+```
+
+
+```{r evasion phenotype type DEG}
+
+df.deg.class <- getDEG(object = so.ct2a[ ,grepl("invivo", so.ct2a@meta.data$replicate) & !grepl("other", so.ct2a@meta.data$consensus_evasion_state)], group_by = "sensitizer.class", return.list = F, return.all = T) %>% dplyr::filter(group %in% "G2") %>% dplyr::filter(!grepl("rpl|rps|mt|rik", tolower(feature)))
+
+lfc.thresh <- 0.1
+p.thresh <- 0.05
+class.deg <- list(
+  G1 = df.deg.class$feature[df.deg.class$logFC < -1*lfc.thresh & df.deg.class$padj < p.thresh],
+  G2 = df.deg.class$feature[df.deg.class$logFC > lfc.thresh & df.deg.class$padj < p.thresh]
+)
+# write.csv(x = namedList2wideDF(class.deg), "Reboot12_evasion_degs_230124.csv")
+
+hg.evasion.class <- runHG(class.deg, gene.universe = rownames(so.ct2a), species = "Mm", pathway.db = "Bader")
+hg.evasion.class.sum <- summarizeHG(hg.evasion.class, show.n = 15)
+
+hg.evasion.class.sum$plots
+table(so.ct2a@meta.data$Barcode)
+
+miko_volcano(df.deg.class, rank.by = "logFC", show.n = 70,label.size = 3, lfc.threshold = lfc.thresh)
+
+```
+
+
+```{r evaluate evasion phenotypes by stemness state}
+
+
+redo.stem <- F
+if (redo.stem){
+  so.ct2a@meta.data$stem.ccat <- scoreStem(object = so.ct2a, method = "CCAT")
+  so.ct2a@meta.data$stem.stemsc <- scoreStem(object = so.ct2a, method = "StemSC")
+  so.ct2a@meta.data$stem.cytotrace <- scoreStem(object = so.ct2a, method = "CytoTRACE")
+  saveRDS(
+    object = list(
+      stem.ccat = so.ct2a@meta.data$stem.ccat,
+      stem.stemsc = so.ct2a@meta.data$stem.stemsc,
+      stem.cytotrace = so.ct2a@meta.data$stem.cytotrace
+    ),
+    file = "Reboot12_stem_scores_230124.rds"
+  )
+} else {
+  stem.list <- readRDS("Reboot12_stem_scores_230124.rds")
+  so.ct2a@meta.data$stem.ccat <- stem.list$stem.ccat
+  so.ct2a@meta.data$stem.stemsc <- stem.list$stem.stemsc
+
+}
+
+df.msd <- msigdbr::msigdbr(species = "Mus musculus", category = "H")
+df.msd <- df.msd %>% dplyr::filter(grepl("MYC", gs_name)) %>% dplyr::select(c("gs_name", "gene_symbol"))
+gs.hm.myc <- longDF2namedList(df.msd, group_by = "gs_name", values = "gene_symbol")
+
+stem.sig.list <- wideDF2namedList(readxl::read_xlsx("C:/Users/n mikolajewicz/Dropbox/PDF Projects - JM/Data/scRNA-seq/01_sci-RNA-seq3_Hong_Kevin_Jason/NM_HH/GBM/Reboot/Papers/Stemness_Signatures_280124.xlsx")) 
+gs.hm.myc$StemSig_Zhang2022 <- stem.sig.list$StemSig_Zhang2022
+ms.stem.res <- runMS(object = so.ct2a, genelist= gs.hm.myc)
+
+so.ct2a@meta.data$MYC_v1 <- ms.stem.res$data$HALLMARK_MYC_TARGETS_V1
+so.ct2a@meta.data$MYC_v2 <- ms.stem.res$data$HALLMARK_MYC_TARGETS_V2
+so.ct2a@meta.data$StemSig_Zhang2022 <- ms.stem.res$dat$StemSig_Zhang2022
+
+so.ct2a@meta.data$evasion.type <- ms.evasion.ct2a$data$class.ms
+
+plt.all <- cowplot::plot_grid(
+  so.ct2a@meta.data %>%
+    dplyr::filter(condition %in% "invivo") %>%
+  ggplot(aes(x = evasion.type, y = MYC_v1)) + 
+  geom_boxplot(fill = "grey", outlier.colour = NA) + 
+  theme_miko() + 
+  labs(x = "Evasion Phenotype", y = "HALLMARK MYC v1"),
+so.ct2a@meta.data %>%
+  dplyr::filter(condition %in% "invivo") %>%
+  ggplot(aes(x = evasion.type, y = MYC_v2)) + 
+  geom_boxplot(fill = "grey", outlier.colour = NA) + 
+  theme_miko() + 
+  labs(x = "Evasion Phenotype", y = "HALLMARK MYC v2"),
+so.ct2a@meta.data %>%
+  dplyr::filter(condition %in% "invivo") %>%
+  ggplot(aes(x = evasion.type, y = stem.ccat)) + 
+  geom_boxplot(fill = "grey", outlier.colour = NA) + 
+  theme_miko() + 
+  labs(x = "Evasion Phenotype", y = "CCAT"),
+so.ct2a@meta.data %>%
+  dplyr::filter(condition %in% "invivo") %>%
+  ggplot(aes(x = evasion.type, y = stem.stemsc)) + 
+  geom_boxplot(fill = "grey", outlier.colour = NA) + 
+  theme_miko() + 
+  labs(x = "Evasion Phenotype", y = "StemSC"),
+so.ct2a@meta.data %>%
+  dplyr::filter(condition %in% "invivo") %>%
+  ggplot(aes(x = evasion.type, y = StemSig_Zhang2022)) + 
+  geom_boxplot(fill = "grey", outlier.colour = NA) + 
+  theme_miko() + 
+  labs(x = "Evasion Phenotype", y = "StemSig_Zhang2022"),
+nrow = 1
+)
+
+plt.all
+
+evasion_p <- function(phenotype = NA){
+ df.current <-  so.ct2a@meta.data %>%
+   dplyr::group_by(evasion.type, Barcode) %>%
+   dplyr::summarize(x.mean = mean(get(phenotype)))
+ t.test(as.formula(paste0("x.mean", "~ evasion.type")), paired = T, data = df.current)$p.value
+}
+
+evasion_p(phenotype = "MYC_v1")
+evasion_p(phenotype = "stem.ccat")
+evasion_p(phenotype = "stem.stemsc")
+evasion_p(phenotype = "StemSig_Zhang2022")
+
+# savePDF("Reboot12_stem_by_evasionstat_boxplot_300124.pdf",plt.all, fig.width = 12, fig.height = 4 )
+
+```
+
+```{r visualize stem-like states, fig.width=12*7/5, fig.height=3}
+
+pt.size <- 1
+df.umap <- getUMAP(so.ct2a)$df.umap
+
+plt.all <- cowplot::plot_grid(
+      df.umap %>% ggplot(aes(x = x, y = y, color = snip(evasion_g1))) + scattermore::geom_scattermore(pointsize = pt.size) + 
+    viridis::scale_color_viridis() + theme_miko() + theme_void() + theme(legend.position = "none") + labs(title = "EVASION_G1"), 
+    df.umap %>% ggplot(aes(x = x, y = y, color = snip(evasion_g2))) + scattermore::geom_scattermore(pointsize = pt.size) + 
+    viridis::scale_color_viridis() + theme_miko() + theme_void() + theme(legend.position = "none") + labs(title = "EVASION_G2"), 
+  df.umap %>% ggplot(aes(x = x, y = y, color = snip(MYC_v1))) + scattermore::geom_scattermore(pointsize = pt.size) + 
+    viridis::scale_color_viridis() + theme_miko() + theme_void() + theme(legend.position = "none") + labs(title = "HALLMARK MYC v1"), 
+  df.umap %>% ggplot(aes(x = x, y = y, color = snip(MYC_v2))) + scattermore::geom_scattermore(pointsize = pt.size) + 
+    viridis::scale_color_viridis()+ theme_miko()+ theme_void() + theme(legend.position = "none") + labs(title = "HALLMARK MYC v2"), 
+  df.umap %>% ggplot(aes(x = x, y = y, color = snip(stem.ccat))) + scattermore::geom_scattermore(pointsize = pt.size) + 
+    viridis::scale_color_viridis()+ theme_miko()+ theme_void() + theme(legend.position = "none") + labs(title = "CCAT"), 
+  df.umap %>% ggplot(aes(x = x, y = y, color = snip(stem.stemsc))) + scattermore::geom_scattermore(pointsize = pt.size) + 
+    viridis::scale_color_viridis()+ theme_miko()+ theme_void() + theme(legend.position = "none") + labs(title = "StemSC"), 
+  df.umap %>% ggplot(aes(x = x, y = y, color = snip(StemSig_Zhang2022))) + scattermore::geom_scattermore(pointsize = pt.size) + 
+    viridis::scale_color_viridis()+ theme_miko()+ theme_void() + theme(legend.position = "none") + labs(title = "StemSig_Zhang2022"),
+  nrow = 1
+)
+
+plt.all
+
+# savePDF("Reboot12_stem_scores_umap_300124.pdf",plt.all, fig.width = 12*7/5, fig.height = 3)
+
+```
+
+
+
+```{r evasion phenotype -  survival analysis}
+
+
+library(survival); library(survminer)
+
+# consolidate gene sets
+cg.list <- lapply(nmf.robust.final, toupper)
+names(cg.list) <- gsub("/", "", names(cg.list))
+
+score.names <- names(cg.list)
+
+# import TCGA data
+if (!exists("df.tcga")) df.tcga <- readRDS("C:/Users/n mikolajewicz/Dropbox/PDF Projects - JM/Data/tcga/rna_expression_tcga_200420.rds")
+if (!exists("tcga.meta")) tcga.meta <- readRDS("C:/Users/n mikolajewicz/Dropbox/PDF Projects - JM/Data/tcga/patient_metaData_tcga_200420.rds")
+
+which.patients <- tcga.meta[["name"]] %in% "Glioblastoma Multiforme"
+# which.patients <- tcga.meta[["name"]] %in% "Brain Lower Grade Glioma"
+
+gbm.meta <- tcga.meta[which.patients]
+gbm.mat <- t(df.tcga[ which.patients, ])
+
+gbm.meta.sub <- data.frame(
+  dtd = tcga.meta[["days_to_death"]],
+  dtf = tcga.meta[["days_to_last_follow_up"]],
+  tumor.grade = tcga.meta[["paper_tumor_grade"]],
+  histology = tcga.meta[["paper_Histology"]],
+  age = tcga.meta[["age_at_diagnosis"]],
+  idh.subtype = tcga.meta[["paper_IDH.status"]],
+  mgmt.promoter = tcga.meta[["paper_MGMT.promoter.status"]],
+  ch7.10 = tcga.meta[["paper_Chr.7.gain.Chr.10.loss"]],
+  ch19.20 = tcga.meta[["paper_Chr.19.20.co.gain"]],
+  o.subtype = tcga.meta[["paper_Original.Subtype"]],
+  t.subtype = tcga.meta[["paper_Transcriptome.Subtype"]],
+  glioma.cluster = tcga.meta[["paper_Pan.Glioma.RNA.Expression.Cluster"]],
+  idh.cluster = tcga.meta[["paper_IDH.specific.RNA.Expression.Cluster"]],
+  rf.class = tcga.meta[["paper_Random.Forest.Sturm.Cluster"]],
+  alive = tcga.meta[["vital_status"]]
+)
+
+gbm.meta.sub$time <- gbm.meta.sub$dtf
+gbm.meta.sub$time[!is.na(gbm.meta.sub$dtd)] <-gbm.meta.sub$dtd[!is.na(gbm.meta.sub$dtd)]
+gbm.meta.sub <- gbm.meta.sub[which.patients, ]
+gbm.meta.sub$alive[is.na(gbm.meta.sub$dtd) & !is.na(gbm.meta.sub$dtf)] <- "Alive"
+
+
+# run GSVA on candidate genesets ###############################################
+tcga.poi <- GSVA::gsva(as.matrix(gbm.mat), lapply(cg.list, toupper), method = "gsva")
+
+df.tcga.poi <- as.data.frame(t(tcga.poi))
+df.tcga.poi %>%
+  ggplot(aes(x = G1, y = G2)) + 
+  geom_point()
+
+df.tcga.gsva <- as.data.frame(t(tcga.poi))
+df.tcga.gsva$sample <- rownames(df.tcga.gsva)
+df.tcga.gsva$line <- stringr::str_extract(df.tcga.gsva$sample, "[A-Za-z0-9]*")
+df.tcga.gsva <- bind_cols(df.tcga.gsva, gbm.meta.sub)
+
+df.surv <- df.tcga.gsva
+df.surv$status <- NA
+df.surv$status[df.surv$alive == "Alive"] <- FALSE
+df.surv$status[df.surv$alive == "Dead"] <- TRUE
+
+df.surv$time <- df.surv$dtf
+df.surv$time[!is.na(df.surv$dtd)] <-df.surv$dtd[!is.na(df.surv$dtd)]
+
+surv.obj <- survival::Surv(df.surv$time, df.surv$status)
+
+message("All Modules")
+tcga.coxph <- coxph(as.formula(paste0("Surv(time, status) ~ " , 
+                                            paste(names(cg.list), collapse = " + "))), 
+                          data = df.surv)
+summary(tcga.coxph)
+
+df.coef.survival <-NULL
+for (i in 1:length(score.names)){
+  message(names(cg.list)[i])
+  tcga.coxph <- coxph(as.formula(paste0("Surv(time, status) ~ " , paste(names(cg.list)[i], collapse = " + "))) , data = df.surv)
+  df.coef.survival <- bind_rows(df.coef.survival, as.data.frame(summary(tcga.coxph)[["coefficients"]]))
+  print(summary(tcga.coxph))
+}
+
+df.coef.survival$id <- rownames(df.coef.survival)
+df.coef.survival$ci.lo <- df.coef.survival$coef - (df.coef.survival$`se(coef)` * 1.96)
+df.coef.survival$ci.hi <- df.coef.survival$coef + (df.coef.survival$`se(coef)` * 1.96)
+
+coxph(as.formula(Surv(time, status) ~ G1+G2) , data = df.surv)
+
+plt.surv.all <- list()
+for (i in 1:length(score.names)){
+
+  hr <- signif(df.coef.survival[ score.names[i],'exp(coef)'], 3)
+  hr.lo <- signif(exp(df.coef.survival[ score.names[i],'ci.lo']), 3)
+  hr.hi <- signif(exp(df.coef.survival[ score.names[i],'exp(coef)']), 3)
+  
+  hr.label <- paste0("HR (95% CI) = ", hr, " (", hr.lo, ", ", hr.hi, ")")
+
+  df.surv$score <- "low"
+  df.surv$score[df.surv[ ,score.names[i]] > median(df.surv[ ,score.names[i]])] <- "high"
+  plt.surv <- ggsurvplot(survfit(surv.obj ~ score , data =df.surv), 
+                         conf.int = F, pval = T, risk.table = F,  
+                         title = paste0(score.names[i]), surv.median.line = "hv")
+
+  plt.surv.all[[score.names[i]]] <- plt.surv$plot + 
+    theme_miko(legend = T) +  # , color.palette = "ptol"
+    scale_color_manual(values = c("score=high" = "tomato", "score=low" = "black")) + 
+    labs(subtitle = hr.label)
+  print( plt.surv.all[[score.names[i]]] )
+  
+  # savePDF(paste0("Reboot12_KM_LGG_", score.names[i], "_300124.pdf"), plt.surv.all[[score.names[i]]])
+}
+
+# plot combined score
+df.surv$score_g1 <- "G1_low"
+df.surv$score_g1[df.surv[ ,"G1"] > median(df.surv[ ,"G1"])] <- "G1_high"
+df.surv$score_g2 <- "G2_low"
+df.surv$score_g2[df.surv[ ,"G2"] > median(df.surv[ ,"G2"])] <- "G2_high"
+try({
+  df.surv$score_g3 <- "G3_low"
+  df.surv$score_g3[df.surv[ ,"G3"] > median(df.surv[ ,"G3"])] <- "G3_high"
+})
+plt.surv <- ggsurvplot(survfit(surv.obj ~ score_g1 + score_g2 + score_g3, data =df.surv), 
+                       conf.int = F, pval = T, risk.table = F,  
+                       title = paste0(score.names[i]), surv.median.line = "hv")
+plt.surv.combo <- plt.surv$plot + 
+  theme_miko(legend = T) + 
+  labs(subtitle = hr.label)
+print( plt.surv.combo)
+
+######################
+df.coef.survival$sig <- df.coef.survival$`Pr(>|z|)` < 0.05
+plt.cox.survival <- df.coef.survival %>% 
+  dplyr::arrange(coef) %>%
+  ggplot(aes(x = coef, y = id, color = sig)) + 
+  geom_point() + 
+  geom_segment(aes(x = ci.lo, xend = ci.hi, y = id, yend = id))  +
+  scale_color_manual(values = c("TRUE" = "tomato", "FALSE" = "black")) +
+  # facet_wrap(~id) + 
+  theme_miko(legend = T) + 
+  geom_vline(xintercept = 0, linetype=  "dashed") + 
+  labs(title = "Cox proportional hazards regression", y = "NMF Module", 
+       subtitle = "NMF module prognositc value in TCGA data", x = "log(Hazard Ratio) +- 95% CI")
+  
+  plt.cox.survival
+    # savePDF("Reboot12_Cox_GBM_240124.pdf", plt.cox.survival)
+
+```
+
+```{r import relevant gs}
+
+
+data(geneSets)
+
+cancer.df <- geneSets[["CancerSEA_Hs"]]
+cancer.list <- wideDF2namedList(cancer.df)
+names(cancer.list) <- paste0(names(cancer.list), "_CancerSEA")
+
+verhaak.df <- geneSets[["Verhaak_CancerCell_2010"]]
+verhaak.list <- wideDF2namedList(verhaak.df)
+names(verhaak.list) <- paste0(names(verhaak.list), "_Verhaak")
+
+richards.df <- geneSets[["Richards_NatureCancer_2021_sc"]]
+richards.list <- wideDF2namedList(richards.df)
+names(richards.list) <- paste0(names(richards.list), "_Richards")
+
+neftel.df <- geneSets[["GBM_Hs_Neftel2019"]]
+neftel.list <- wideDF2namedList(neftel.df)
+neftel.list <- neftel.list[!grepl("G", names(neftel.list))]
+names(neftel.list) <- paste0(names(neftel.list), "_Neftel")
+
+gsc.df <- geneSets[["GSC_Catalog"]]
+gsc.list <- wideDF2namedList(gsc.df)
+names(gsc.list) <- paste0(names(gsc.list), "_GSC")
+
+gavish.df <- geneSets[["Gavish2022_Tumor_Hallmarks"]]
+gavish.list <- wideDF2namedList(gavish.df)
+names(gavish.list) <- paste0(names(gavish.list), "_Gavish")
+
+hallmark.df <- geneSets[["HALLMARK"]]
+hallmark.list <- wideDF2namedList(hallmark.df)
+names(hallmark.list) <- paste0(names(hallmark.list), "_HALLMARK")
+
+ivy.df <- geneSets[["Puchalski2018_IVY_GBM"]]
+ivy.list <- wideDF2namedList(ivy.df)
+names(ivy.list) <- paste0(names(ivy.list), "_IVY")
+
+
+nmf.robust.final.current <- nmf.robust.final
+names(nmf.robust.final.current) <- paste0(names(nmf.robust.final.current), "_EVASION")
+
+df.nmf.glioma <- read.csv("C:/Users/n mikolajewicz/Dropbox/PDF Projects - JM/Collaborations/Zsolt/GBM_2022/data/Genesets/nmf_genesets/murine_glioma_NMF_programs.csv")
+miko.list <- wideDF2namedList(df.nmf.glioma)
+names(miko.list) <- paste0(names(miko.list), "_Miko")
+
+
+# Ayers et al 2017 - https://www.ncbi.nlm.nih.gov/pmc/articles/PMC5531419/
+T_inflamed_GEP_Ayers2017 <- c("TIGIT", "CD27", "CD8A", "PDCD1LG2", "LAG3", "CD274", "CXCR6", "CMKLR1", "NKG7", "CCL5", "PSMB10", "IDO1", "CXCL9", "HLA.DQA1", "CD276", "STAT1", "HLA.DRB1", "HLA.E")
+
+# Wang et al 2021 - tumor immune phenotype
+cold_genes_Wang2021 <- c("CXCL1", "CXCL2", "CCL20") 
+hot_genes_Wang2021 <- c( "CD274", "PDCD1", "CXCL9", "CXCL10", "CXCL11", "CXCR3", "CD3E", "CD4", "CD8A", "CD8B", "CCL5","CXCR4")
+
+
+stem.sig.list <- wideDF2namedList(readxl::read_xlsx("C:/Users/n mikolajewicz/Dropbox/PDF Projects - JM/Data/scRNA-seq/01_sci-RNA-seq3_Hong_Kevin_Jason/NM_HH/GBM/Reboot/Papers/Stemness_Signatures_280124.xlsx")) 
+
+greenwald.sig.list <- wideDF2namedList(readxl::read_xlsx("C:/Users/n mikolajewicz/Dropbox/PDF Projects - JM/Data/scRNA-seq/01_sci-RNA-seq3_Hong_Kevin_Jason/NM_HH/GBM/Reboot/Papers/Greenwald_metaprograms_280124.xlsx")) 
+
+misc.list <- lapply(list(
+  T_inflamed_GEP_Ayers2017 = T_inflamed_GEP_Ayers2017,
+  cold_tumor_Wang2021 = cold_genes_Wang2021,
+  hot_tumor_Wang2021 = hot_genes_Wang2021
+  
+), toupper)
+
+miko_message("Convert to Hs symbols...")
+persistor.list.hs <- lapply(persistor.list, toupper)
+verhaak.list <- lapply(verhaak.list, toupper)
+gsc.list <- lapply(gsc.list, toupper)
+neftel.list <- lapply(neftel.list, toupper)
+cancer.list <- lapply(cancer.list, toupper)
+gsc.list <- lapply(gsc.list, toupper)
+gavish.list <- lapply(gavish.list, toupper)
+hallmark.list <- lapply(hallmark.list, toupper)
+ivy.list <- lapply(ivy.list, toupper)
+nmf.robust.final.current <- lapply(nmf.robust.final.current, toupper)
+master.set <- c(neftel.list, richards.list, cancer.list, verhaak.list, gavish.list, 
+                hallmark.list, ivy.list, persistor.list.hs, nmf.robust.final.current, miko.list, gsc.list, stem.sig.list, misc.list, greenwald.sig.list) #  gsc.list, 
+
+master.set <- lapply(master.set, toupper)
+
+
+```
+
+```{r Cloughesy 2019, fig.width=8, fig.height=6}
+
+c2019.dat <- readxl::read_xlsx(path = "C:/Users/n mikolajewicz/Dropbox/PDF Projects - JM/Collaborations/Maleeha/Cloughesy 2019/GSE121810_Prins.PD1NeoAdjv.Jul2018.HUGO.PtID.xlsx")
+
+c2019.dat <- col2rowname(c2019.dat, "Genes")
+c2019.mat <- as.matrix(c2019.dat)
+
+c2019.meta <- read.csv("C:/Users/n mikolajewicz/Dropbox/PDF Projects - JM/Collaborations/Maleeha/Cloughesy 2019/Neoadj PD-1 survival_RNAseq links_01162021.csv")
+c2019.meta$patient <- stringr::str_extract(gsub("-", "", c2019.meta$SUBJECT_ID), "[0-9][0-9]")
+c2019.meta <- c2019.meta[!is.na(c2019.meta$patient), ]
+
+
+gs.input.clou <- list(
+  G1 = nmf.robust.final$G1,
+  G2 = nmf.robust.final$G2,
+  persistor = master.set$persistor
+)
+
+try({
+  gs.input.clou$G3 <-  nmf.robust.final$G3
+})
+c2019.gsva <- GSVA::gsva(c2019.mat, gset.idx.list = lapply(gs.input.clou, toupper), method = "gsva")
+
+df.c2019.gsva <- as.data.frame(t(c2019.gsva))
+df.c2019.gsva$subject.id <- rownames(df.c2019.gsva)
+df.c2019.gsva$patient <- stringr::str_remove(gsub("-", "", df.c2019.gsva$subject.id ), "Pt")
+df.c2019.gsva$patient <- stringr::str_remove(df.c2019.gsva$patient, "_A")
+df.c2019.gsva$patient <- stringr::str_remove(df.c2019.gsva$patient, "_B")
+df.c2019.gsva$nc <- nchar(df.c2019.gsva$patient) 
+df.c2019.gsva$patient[df.c2019.gsva$nc == 1] <- paste0("0", df.c2019.gsva$patient[df.c2019.gsva$nc == 1])
+
+df.c2019.merge <- merge(c2019.meta, df.c2019.gsva, by = "patient")
+df.c2019.merge$score <- df.c2019.merge$G2
+
+kt.res <- (kruskal.test(score  ~ (disease_status), data = df.c2019.merge))
+kt.res <- (wilcox.test(score  ~ (disease_status), data = df.c2019.merge))$p.value
+
+plt.c2019.box <- df.c2019.merge %>%
+  ggplot(aes(x = disease_status, y = score)) + 
+  geom_boxplot(fill = "grey") + 
+  geom_point() + 
+  labs(subtitle = paste0("Cloughesy 2019\np = ", signif(kt.res, 3)), title = "G1 phenotype by therapy type", x = "Therapy", y = "Score") + 
+  theme_miko()
+
+df.c2019.merge %>% 
+  dplyr::group_by(disease_status) %>%
+  dplyr::tally()
+
+df.c2019.merge$im.status <- "low"
+ df.c2019.merge$im.status[df.c2019.merge$score > median(df.c2019.merge$score)] <- "high"
+ 
+ coxph(formula = Surv(os_days, os_stat) ~ (score) , data =df.c2019.merge %>% dplyr::filter(disease_status == "neoadjuvant"))
+ coxph(formula = Surv(os_days, os_stat) ~ (score) , data =df.c2019.merge %>% dplyr::filter(disease_status == "adjuvant"))
+  coxph(formula = Surv(os_days, os_stat) ~ (score + disease_status) , data =df.c2019.merge )
+  
+  df.c2019.merge %>%
+    ggplot(aes(x = disease_status, y = score, fill = as.character(os_stat))) + 
+    geom_boxplot()
+
+plt.c2019.surv.na <- ggsurvplot(survfit(Surv(os_days, os_stat) ~ (im.status) , data =df.c2019.merge %>% dplyr::filter(disease_status == "neoadjuvant")),
+                               conf.int = F, pval = T, risk.table = F,
+                               title = "Neoadjuvant cohort", surv.median.line = "hv")[["plot"]] +
+  theme_miko(color.palette = "ptol", legend = T) + theme(legend.position = "bottom") + labs(subtitle = "Cloughesy 2019")
+
+plt.c2019.surv.a <- ggsurvplot(survfit(Surv(os_days, os_stat) ~ (im.status) , data =df.c2019.merge %>% dplyr::filter(disease_status == "adjuvant")),
+                               conf.int = F, pval = T, risk.table = F,
+                               title = paste0("Adjuvant cohort"), surv.median.line = "hv")[["plot"]] +
+  theme_miko(color.palette = "ptol", legend = T) + theme(legend.position = "bottom") + labs(subtitle = "Cloughesy 2019")
+
+ggsurvplot(survfit(Surv(os_days, os_stat) ~ (im.status + disease_status) , data =df.c2019.merge),
+                               conf.int = F, pval = T, risk.table = F,
+                               title = paste0("Adjuvant cohort"), surv.median.line = "hv")[["plot"]] +
+  theme_miko(color.palette = "ptol", legend = T) + theme(legend.position = "bottom") + labs(subtitle = "Cloughesy 2019")
+
+plt.c2019.surv.na
+plt.c2019.surv.a
+plt.c2019.box
+```
+
+```{r import zhao 2019 data}
+
+df.zhao <- read.csv(file = "C:/Users/n mikolajewicz/Dropbox/PDF Projects - JM/Data/scRNA-seq/01_sci-RNA-seq3_Hong_Kevin_Jason/NM_HH/Data/Results/GBM (UHN)/Zhao2019_NatureMedicine/RPKM_matrix.csv")
+df.zhao.patient <- readxl::read_xlsx( "C:/Users/n mikolajewicz/Dropbox/PDF Projects - JM/Data/scRNA-seq/01_sci-RNA-seq3_Hong_Kevin_Jason/NM_HH/Data/Results/GBM (UHN)/Zhao2019_NatureMedicine/GBM_PD1_samples_NMclean.xlsx")
+df.zhao <- col2rowname(df.zhao, "X")
+
+```
+
+
+```{r Zhao 2019 nature medicine validation}
+
+df.zhao <- read.csv(file = "C:/Users/n mikolajewicz/Dropbox/PDF Projects - JM/Data/scRNA-seq/01_sci-RNA-seq3_Hong_Kevin_Jason/NM_HH/Data/Results/GBM (UHN)/Zhao2019_NatureMedicine/RPKM_matrix.csv")
+
+df.zhao.patient <- readxl::read_xlsx( "C:/Users/n mikolajewicz/Dropbox/PDF Projects - JM/Data/scRNA-seq/01_sci-RNA-seq3_Hong_Kevin_Jason/NM_HH/Data/Results/GBM (UHN)/Zhao2019_NatureMedicine/GBM_PD1_samples_NMclean.xlsx")
+
+df.zhao.patient2 <- read.csv( "C:/Users/n mikolajewicz/Dropbox/PDF Projects - JM/Data/scRNA-seq/01_sci-RNA-seq3_Hong_Kevin_Jason/NM_HH/Data/Results/GBM (UHN)/Zhao2019_NatureMedicine/patient_characteristics_FigS1.csv")
+colnames(df.zhao.patient2) <- rmvCSVprefix(colnames(df.zhao.patient2))
+
+df.zhao.patient <- merge(df.zhao.patient,df.zhao.patient2, by = "patient_id")
+
+which.set <- "G2"
+
+df.zhao <- col2rowname(df.zhao, "X")
+
+zhao.col <- gsub("\\.", "-", gsub("X", "",colnames(df.zhao) ))
+colnames(df.zhao) <- zhao.col
+
+df.zhao.ag.ti <- df.zhao[rownames(df.zhao) %in% unlist(toupper(nmf.robust.final[[which.set]])), ]
+
+df.zhao.patient <- as.data.frame(df.zhao.patient)
+df.zhao.patient <- df.zhao.patient %>% dplyr::filter(pre_pos == "pre")
+
+# GSVA
+zhao.gsva <- GSVA::gsva(expr = as.matrix(log10(df.zhao + 1)), gset.idx.list = lapply(nmf.robust.final[which.set], toupper), method = "gsva")
+df.gsva.score <- data.frame(sample_name = colnames(zhao.gsva), gsva = zhao.gsva[1,])
+df.gsva.score <- merge(df.gsva.score, df.zhao.patient,  by = "sample_name")
+df.gsva.score$alive <- df.gsva.score$alive_status == 0
+
+df.gsva.score$response2 <- NA
+df.gsva.score$response2[df.gsva.score$response == "Yes"] <- "Responder"
+df.gsva.score$response2[df.gsva.score$response == "No"] <- "Non-Responder"
+plt.box.zhao <- df.gsva.score %>%
+  ggplot(aes(x = alive, y = gsva)) + 
+  geom_boxplot(fill = "grey") + 
+  geom_point() + 
+  labs(title = "Evasion score by response and survival status", y = "score (GSVA)", x = "Alive")  + 
+  facet_wrap(~response2, ncol = 1) + theme_miko(legend = F)
+
+plt.box.zhao <- df.gsva.score %>%
+  ggplot(aes(x = alive, y = gsva)) + 
+  geom_boxplot(fill = "grey") + 
+  geom_point() + 
+  labs(title = "Evasion score by response and survival status", y = "score (GSVA)", x = "Alive")  + 
+  facet_wrap(~response2, ncol = 1) + theme_miko(legend = F)
+
+df.gsva.score.sum <- df.gsva.score %>%
+  dplyr::group_by(response2) %>%
+  dplyr::summarise(
+    score.mean = mean(gsva),
+    score.median = median(gsva),
+    score.sd = sd(gsva),
+    score.se = sd(gsva)/sqrt(length(gsva))
+  )
+
+pval.resp <- wilcox.test(gsva ~ response2 , data = df.gsva.score, alternative = "less")$p.value
+
+library(Rfast)
+
+plt.response <- df.gsva.score %>%
+  dplyr::filter(pre_pos == "pre") %>%
+  ggplot(aes(x = response2, y = gsva)) + 
+     geom_boxplot(outlier.color = NA, fill = "grey95") + 
+  ggbeeswarm::geom_quasirandom(fill = "grey", size= 2, pch = 21) + 
+  labs(title = "Evasion score by response and survival status",
+       subtitle = paste0("p = ", signif(pval.resp, 3)),
+       y = "score (GSVA)", x = "Alive")  + 
+  theme_miko(legend = F)  
+plt.response
+
+# savePDF("Reboot12_G1_by_immunotherapyResp_Zhao2019_250123.pdf",plt.response,  fig.width = 4, fig.height = 4)
+
+```
+
+
+```{r run ESTIMATE}
+estimate::outputGCT(as.data.frame(as.matrix((df.zhao ))), output.f = "Reboot12_estimate_input_zhao_310124")
+
+estimateScore(input.ds = "Reboot12_estimate_input_zhao_310124",
+              output.ds = "Reboot12_estimate_results_zhao_310124.txt",
+              platform = c("illumina"))
+
+df.estimate <- read.delim("Reboot12_estimate_results_zhao_310124", header = T)
+df.estimate <- as.data.frame(t(df.estimate[-1, c(-1,-2)]))
+colnames(df.estimate) <- c("sample", "StromalScore", "ImmuneScore", "ESTIMATE")
+df.estimate$StromalScore <- as.numeric(df.estimate$StromalScore )
+df.estimate$ImmuneScore <- as.numeric(df.estimate$ImmuneScore )
+df.estimate$ESTIMATE <- as.numeric(df.estimate$ESTIMATE )
+```
+
+
+```{r compare AUCs, fig.width=5, fig.height=4}
+
+library(estimate)
+
+runIEGPI <- function(emat, species = "Hs"){
+  emat <- log10(emat + 1)
+  df.iegpli <- readxl::read_xlsx("C:/Users/n mikolajewicz/Dropbox/PDF Projects - JM/Data/scRNA-seq/01_sci-RNA-seq3_Hong_Kevin_Jason/NM_HH/GBM/Reboot/Results/Reboot12_tnf_ifn_sensitivity/Lu2022_IEGPLI_genes.xlsx")
+  
+  if (species %in% "Mm"){
+    df.iegpli$gene <- firstup(df.iegpli$`Including genes`)
+  } else {
+    df.iegpli$gene <- df.iegpli$`Including genes`
+  }
+  
+  common.gene <- intersect(df.iegpli$gene, rownames(emat))
+  
+  # emat <- object@assays[[assay]]@datmata
+  emat <- as.matrix(t(emat[rownames(emat) %in% common.gene, ]))
+  emat <- emat[ ,common.gene]
+  
+  df.iegpli <- df.iegpli %>% dplyr::filter(gene %in% common.gene)
+  rownames(df.iegpli) <- df.iegpli$gene
+  df.iegpli <- df.iegpli[common.gene, ]
+  
+  emat.component <- emat %*% df.iegpli$genescoeff
+  
+  Matrix::rowSums(emat.component)
+  
+  
+}
+
+runChen <- function(emat, species = "Hs"){
+  emat <- log10(emat + 1)
+  
+ df.chen <- data.frame(
+    gene =  c("IL21", "EXT1", "ICAM4", "IFNG", "LPAR1", "NOX4", "TAPBP", "TTBK1"),
+    genescoeff = c(0.21491250, -0.03889620, -0.05185152, 0.17571700, -0.03137898, -0.01954522, 0.02632763, 0.06288640)
+  )
+  
+  if (species %in% "Mm"){
+    df.chen$gene <- firstup(df.chen$gene)
+  } else {
+    df.chen$gene <- df.chen$gene
+  }
+  
+  common.gene <- intersect(df.chen$gene, rownames(emat))
+  
+  emat <- as.matrix(t(emat[rownames(emat) %in% common.gene, ]))
+  emat <- emat[ ,common.gene]
+  
+  df.chen <- df.chen %>% dplyr::filter(gene %in% common.gene)
+  rownames(df.chen) <- df.chen$gene
+  df.chen <- df.chen[common.gene, ]
+  
+  emat.component <- emat %*% df.chen$genescoeff
+  
+  Matrix::rowSums(emat.component)
+  
+  
+}
+
+# https://www.nature.com/articles/s41598-022-17735-6
+runYang <- function(emat, species = "Hs"){
+  emat <- log10(emat + 1)
+  df.yang <- data.frame(
+    gene =  c("FGF4", "FGL1", "LIM2", "NPY", "F13A1", "CDH12", "CD1E", "OTX2", "ADRA1D", "SAMD9L", "ZFP42", "GAGE2A", "KLRC2"),
+    genescoeff = c(0.1186, 0.06922, -0.13624, -0.08743, 0.13426, -0.06918, -0.15824, -0.06260, 0.06185, 0.23177, 0.07060, 0.07751, -0.16373)
+  )
+  
+  if (species %in% "Mm"){
+    df.yang$gene <- firstup(df.yang$gene)
+  } else {
+    df.yang$gene <- df.yang$gene
+  }
+  
+  common.gene <- intersect(df.yang$gene, rownames(emat))
+  
+  emat <- as.matrix(t(emat[rownames(emat) %in% common.gene, ]))
+  emat <- emat[ ,common.gene]
+  
+  df.yang <- df.yang %>% dplyr::filter(gene %in% common.gene)
+  rownames(df.yang) <- df.yang$gene
+  df.yang <- df.yang[common.gene, ]
+  
+  emat.component <- emat %*% df.yang$genescoeff
+  
+  Matrix::rowSums(emat.component)
+}
+
+  # https://pubmed.ncbi.nlm.nih.gov/32894375/
+# https://link.springer.com/article/10.1007/s10571-020-00959-3/tables/2
+run1p19q <- function(emat, species = "Hs"){
+  emat <- log10(emat + 1)
+  
+ df.1p19q <- data.frame(
+    gene =  c("S100A3", "FAM19A3", "ADM2", "CLCF1", "TNFRSF11B", "FLP1R", "TRDC", "F2RL1", "VAV3", "BMP8B", "NTS", "AR", "PRLHR"),
+    genescoeff = c(0.010009781, 0.048040197, 0.002940087, 0.021229638, 0.013799876, -0.000625507, 0.039746687, 	
+0.061144932, 0.053997988, 0.14087201, 0.021282164, 0.033614978, -0.084033137)
+  )
+  
+  if (species %in% "Mm"){
+    df.1p19q$gene <- firstup(df.1p19q$gene)
+  } else {
+    df.1p19q$gene <- df.1p19q$gene
+  }
+  
+  common.gene <- intersect(df.1p19q$gene, rownames(emat))
+  
+  emat <- as.matrix(t(emat[rownames(emat) %in% common.gene, ]))
+  emat <- emat[ ,common.gene]
+  
+  df.1p19q <- df.1p19q %>% dplyr::filter(gene %in% common.gene)
+  rownames(df.1p19q) <- df.1p19q$gene
+  df.1p19q <- df.1p19q[common.gene, ]
+  
+  emat.component <- emat %*% df.1p19q$genescoeff
+  
+  Matrix::rowSums(emat.component)
+  
+  
+}
+
+runWang <- function(emat, species = "Hs"){
+
+  
+  emat <- log10(emat + 1)
+    df.wang <- bind_rows(
+    data.frame(
+      gene = c("CXCL1", "CXCL2", "CCL20"),
+      genescoeff = -1),
+    data.frame(
+      gene = c( "CD274", "PDCD1", "CXCL9", "CXCL10", "CXCL11", "CXCR3", "CD3E", "CD4", "CD8A", "CD8B", "CCL5","CXCR4"),
+      genescoeff = 1)
+  )
+    
+  if (species %in% "Mm"){
+    df.wang$gene <- firstup(df.wang$gene)
+  } else {
+    df.wang$gene <- df.wang$gene
+  }
+  
+  common.gene <- intersect(df.wang$gene, rownames(emat))
+  
+  emat <- as.matrix(t(emat[rownames(emat) %in% common.gene, ]))
+  emat <- emat[ ,common.gene]
+  
+  df.wang <- df.wang %>% dplyr::filter(gene %in% common.gene)
+  rownames(df.wang) <- df.wang$gene
+  df.wang <- df.wang[common.gene, ]
+  
+  emat.component <- emat %*% df.wang$genescoeff
+  
+  Matrix::rowSums(emat.component)
+  
+  
+}
+
+runTIDE <- function(emat){
+  
+    miko_message("Checking python modules...")
+  library(reticulate, quietly = T)
+  if (!(py_module_available("tidepy"))){
+    miko_message("Installing 'TIDEpy' python module...")
+    py_install("tidepy", pip = T)
+  }
+  TIDEpy <- import("tidepy")
+    tidepy.pred <- import("tidepy.pred")
+tide.result = tidepy.pred$TIDE(emat ,cancer='Other',pretreat=FALSE,vthres=0.)
+
+return(tide.result)
+}
+
+# Ayers et al 2017 - https://www.ncbi.nlm.nih.gov/pmc/articles/PMC5531419/
+T_inflamed_GEP_Ayers2017 <- c("TIGIT", "CD27", "CD8A", "PDCD1LG2", "LAG3", "CD274", "CXCR6", "CMKLR1", "NKG7", "CCL5", "PSMB10", "IDO1", "CXCL9", "HLA.DQA1", "CD276", "STAT1", "HLA.DRB1", "HLA.E")
+
+# Wang et al 2021 - tumor immune phenotype
+cold_genes_Wang2021 <- c("CXCL1", "CXCL2", "CCL20") 
+hot_genes_Wang2021 <- c( "CD274", "PDCD1", "CXCL9", "CXCL10", "CXCL11", "CXCR3", "CD3E", "CD4", "CD8A", "CD8B", "CCL5","CXCR4")
+
+df.immune.modulatory <- readxl::read_xlsx("C:/Users/n mikolajewicz/Dropbox/PDF Projects - JM/Data/scRNA-seq/01_sci-RNA-seq3_Hong_Kevin_Jason/NM_HH/GBM/Reboot/Data/Chen_2023_CIT/immune_signatures_chen.xlsx")
+df.immune.modulatory$set <- gsub(" ", "_", df.immune.modulatory$set)
+im.list <- longDF2namedList(df.immune.modulatory, group_by = "set", values = "gene")
+
+zhao.test.sets <- list(
+  E1 = nmf.robust.final$G1,
+  E2 = nmf.robust.final$G2,
+    ICM = c("PDCD1", 'PDCD1LG2', 'CTLA4', 'CD274', 'LAG3', 'IDO1', 'BTLA', 'CD244', 'CD40', 'CD40LG', 'BTN2A1', 'BTN2A2', 'BTN3A1'), # https://link.springer.com/article/10.1007/s12033-023-00820-0
+  Li_Glioma_Score = c('TOP2A', 'RRM2', 'KIF20A', 'DLGAP5'), # https://link.springer.com/article/10.1007/s12033-023-00820-0 #Li et al 2023
+  CYT = im.list$CYT,
+  TIGEP_Ayers = T_inflamed_GEP_Ayers2017 # T inflamed gene expression program (_Ayers2017)
+)
+zhao.test.sets <- lapply(zhao.test.sets, toupper)
+zhao.gsva <- GSVA::gsva(expr = as.matrix((df.zhao )), gset.idx.list = zhao.test.sets, method = "gsva")
+zhao.tide <- runTIDE(as.data.frame(as.matrix((df.zhao ))))
+df.gsva.score <- data.frame(t(zhao.gsva))
+df.gsva.score$IEGPI <- runIEGPI(as.matrix((df.zhao )), species = "Hs")
+df.gsva.score$Xu_1p19q <- run1p19q(as.matrix((df.zhao )), species = "Hs")
+df.gsva.score$TIP_Wang <- runWang(as.matrix((df.zhao )), species = "Hs")
+df.gsva.score$Lung_Yang <- runYang(as.matrix((df.zhao )), species = "Hs")
+df.gsva.score$StromalScore <- df.estimate$StromalScore
+df.gsva.score$ImmuneScore <- df.estimate$ImmuneScore
+df.gsva.score$ESTIMATE <- df.estimate$ESTIMATE
+df.gsva.score$IRS_Chen <- runChen(as.matrix((df.zhao )), species = "Hs")
+
+df.gsva.score <- bind_cols(df.gsva.score, zhao.tide %>% dplyr::select(c("TIDE", "IFNG", "CD274", "CD8", "Dysfunction", "Exclusion", "MDSC", "CAF", "CTL")))
+df.gsva.score$TAM_M2 <- zhao.tide$`TAM M2`
+df.gsva.score$MSI_Score  <- zhao.tide$`MSI Score`
+
+df.gsva.score$sample_name <- colnames(zhao.gsva)
+df.gsva.score <- merge(df.gsva.score, df.zhao.patient,  by = "sample_name")
+
+df.gsva.score$is.resp <- df.gsva.score$response == "Yes"
+score.names <- c(names(zhao.test.sets), "IEGPI", "TIDE", "IFNG", "CD274", "CD8",  "MDSC", "CAF", "TAM_M2", "CTL", "TIP_Wang", "Lung_Yang", "StromalScore", "ImmuneScore", "ESTIMATE", "IRS_Chen", "Xu_1p19q")
+
+library(pROC)
+df.auc <- NULL
+for (i in 1:length(score.names)){
+  fit <- glm(as.formula(paste0("is.resp ~ ", score.names[i])) , family="binomial", data = df.gsva.score)
+  
+  
+  df.gsva.score$score <- df.gsva.score[ ,score.names[i]]
+  p.w <- wilcox.test(score ~ is.resp, data = df.gsva.score)$p.value
+  p.t <- t.test(score ~ is.resp, data = df.gsva.score)$p.value
+  
+  fit.summary <- summary(fit)
+  auc.current <- auc(df.gsva.score$is.resp, predict(fit, df.gsva.score, type="response"))
+  
+ x1 <- mean((df.gsva.score %>% dplyr::filter(!is.resp))$score)
+ x2 <- mean((df.gsva.score %>% dplyr::filter(is.resp))$score)
+ sd12 <- sd(df.gsva.score$score)
+  
+  df.auc <- bind_rows(df.auc,
+                      data.frame(
+                        score = score.names[i] ,
+                        auc = as.numeric(auc.current),
+                        p_fit = fit.summary[["coefficients"]][2,4],
+                        p_wilcox = p.w,
+                        p_ttest = p.t,
+                        delta = (x2 - x1)/sd12
+                      ))
+}
+
+
+do.combined <- F
+
+if (do.combined){
+ fit <- glm(is.resp  ~ IFNG + IEGPI + E2 + MSI_Score , family="binomial", data = df.gsva.score)
+ fit <- glm(is.resp  ~ IFNG + E2, family="binomial", data = df.gsva.score)
+ summary(fit)
+  df.auc <- bind_rows(df.auc,
+                      data.frame(
+                        score = "E1 + E2" ,
+                        auc =as.numeric(auc(df.gsva.score$is.resp, predict(fit, df.gsva.score, type="response")))
+                      )) 
+}
+
+filter.what <- c("StromalScore|ImmuneScore|1p19q|MSI")
+
+plt.1 <- df.auc %>%
+  dplyr::filter(!grepl(filter.what, score)) %>%
+  ggplot(aes(x = auc, y = reorder(score, auc),  fill = p_wilcox < 0.1)) + # color = p_wilcox < 0.1,
+  geom_bar(stat = "identity") + 
+  labs(x = "AUROC", y = "Score") + 
+  theme_miko() + 
+  # scale_color_manual(values = c("TRUE" = "red", "FALSE" = "black")) + 
+   scale_fill_manual(values = c("TRUE" = "red", "FALSE" = "grey")) + 
+  geom_vline(xintercept = 0.5, linetype = "dashed") + 
+  coord_cartesian(xlim = c(0, 1))
+
+
+plt.2 <- df.auc %>%
+  dplyr::filter(!grepl(filter.what, score)) %>%
+  ggplot(aes(x = delta, y = -log10(p_wilcox), fill = p_wilcox < 0.1)) + 
+  geom_point(aes(size = abs(delta)), pch = 21) + 
+  ggrepel::geom_text_repel(aes(label = score), max.overlaps = Inf, min.segment.length = 0) + 
+  theme_miko() + 
+  geom_hline(yintercept = -log10(0.1), linetype = "dashed") + 
+  geom_vline(xintercept = 0, linetype = "dashed") + 
+  scale_fill_manual(values = c("TRUE" = "red", "FALSE" = "grey")) +
+  labs(title = "Immune Signatures", x = "Standardized Difference", y = "-log10(p)") 
+
+
+```
+```{r benchmark ICI prediction - AUC ranks, fig.width=8, fig.height=4}
+
+plt.combo <- cowplot::plot_grid(plt.2, plt.1, align = "h")
+plt.combo
+# savePDF("Reboot12_AUC_results_020224.pdf" , plt.combo, fig.width=8, fig.height=4)
+
+```
+
+
+```{r evaluate correlation between evasiion modules and GBM subtypes, fig.width=10, fig.height=10}
+
+redo.scores <- F
+
+if (redo.scores){
+  
+  if (!exists("so.hs")) so.hs <- readRDS("PR4_tumor_list_processed_miko_abdel_wang_080523.rds")
+
+df.sim.all <- NULL
+ms.res.list <- list()
+for (i in 1:length(so.hs)){
+  
+  
+  try({
+
+  sname <- names(so.hs)[i]
+  miko_message(sname)
+  object <- so.hs[[sname]]
+  
+  ms.result <- runMS(object = object, genelist = master.set, return.plots = F, scale = F)
+  
+  df.res <- ms.result[["data"]] %>% dplyr::select(-c("class.ms"))
+  smat <- cor(df.res, method = "spearman")
+
+  df.sim <- as.data.frame(smat[!grepl("EVASION", rownames(smat)), grepl("EVASION", rownames(smat))])
+  
+  ms.res.list[[sname]] <- df.res
+  df.sim$pathway <- rownames(df.sim)
+  df.sim$sample <- sname
+  df.sim.all <- bind_rows(df.sim.all, df.sim)
+  
+  })
+}
+
+df.sim.all.long <- pivot_longer(df.sim.all, cols = names(nmf.robust.final.current))
+colnames(df.sim.all.long) <- c("glioma_pathway", "sample", "evasion_pathway", "r")
+
+### stemness metrics
+df.stem.all <- NULL
+stem.res.list <- list()
+for (i in 1:length(so.hs)){
+  
+  try({
+
+  sname <- names(so.hs)[i]
+  miko_message(sname)
+  object <- so.hs[[sname]]
+  
+  ccat.current <- scoreStem(object, method = "CCAT")
+  stemsc.current <- scoreStem(object, method = "StemSC")
+  
+  df.res <- ms.res.list[[sname]] 
+  
+  df.res.current <- data.frame(
+    G1_EVASION =  df.res$G1_EVASION,
+    G2_EVASION =  df.res$G2_EVASION,
+    CCAT_stem =  ccat.current,
+    StemSC_stem = stemsc.current
+  )
+  
+  smat <- cor(df.res.current, method = "spearman")
+   df.sim <- as.data.frame(smat[!grepl("EVASION", rownames(smat)), grepl("EVASION", rownames(smat))])
+  
+  stem.res.list[[sname]] <- df.res
+  df.sim$pathway <- rownames(df.sim)
+  df.sim$sample <- sname
+  df.stem.all <- bind_rows(df.stem.all, df.sim)
+   
+  })
+}
+
+df.stem.all.long <- pivot_longer(df.stem.all, cols = names(nmf.robust.final.current))
+colnames(df.stem.all.long) <- c("glioma_pathway", "sample", "evasion_pathway", "r")
+
+
+df.sim.all.long <- bind_rows(df.sim.all.long, df.stem.all.long)
+
+df.sim.all.sum <- df.sim.all.long %>%
+  dplyr::group_by(evasion_pathway, glioma_pathway) %>%
+  dplyr::summarise(r.mean = mean(r),
+                   r.median = median(r),
+                   pval = t.test(r)$p.value)
+df.sim.all.sum$padj <- p.adjust(df.sim.all.sum$pval, method = "BH")
+
+
+saveRDS(
+  list(
+    df.sim.all.long = df.sim.all.long,
+    stem.res.list = stem.res.list,
+    ms.res.list = ms.res.list
+  ),
+  file = "Reboot12_evasionCalculations_HsGBM_v2_280123.rds"
+)
+
+  
+} else {
+ hs.scores <-  readRDS("Reboot12_evasionCalculations_HsGBM_v2_280123.rds")
+ df.sim.all.long <- hs.scores$df.sim.all.long
+ stem.res.list <- hs.scores$stem.res.list
+ ms.res.list <- hs.scores$ms.res.list
+}
+
+df.tide.all.long <- pivot_longer(df.tide.all, cols = names(nmf.robust.final.current))
+colnames(df.tide.all.long) <- c("glioma_pathway", "sample", "evasion_pathway", "r")
+df.tide.all.long$PR <- "other"
+df.tide.all.long$PR[grepl("_R", df.tide.all.long$sample)] <- "Recurrent"
+df.tide.all.long$PR[grepl("_P", df.tide.all.long$sample)] <- "Primary"
+
+df.sim.all.long <- unique(bind_rows(df.sim.all.long, df.tide.all.long))
+
+
+```
+
+
+```{r primary vs. recurrent}
+
+
+df.activity.all <- NULL
+for (i in 1:length(ms.res.list)){
+  
+  sname <- names(ms.res.list)[i]
+  
+  df.current <- ms.res.list[[sname]] 
+  
+  df.activity.all <- bind_rows(
+    df.activity.all,
+    data.frame(
+      sample = sname,
+      activity = df.current$G1_EVASION,
+      active = df.current$G1_EVASION > 0,
+      evasion_pathway = "G1_EVASION"
+    ),   
+    data.frame(
+      sample = sname,
+      activity = df.current$G2_EVASION,
+      active = df.current$G2_EVASION > 0,
+      evasion_pathway = "G2_EVASION"
+    )
+  )
+}
+
+df.activity.all$PR <-  NA
+df.activity.all$PR[grepl("_P", df.activity.all$sample)] <- "Primary"
+df.activity.all$PR[grepl("_R", df.activity.all$sample)] <- "Recurrent"
+
+
+df.activity.all$study <-  NA
+df.activity.all$study[grepl("Mikolajewicz", df.activity.all$sample)] <- "Mikolajewicz"
+df.activity.all$study[grepl("Wang", df.activity.all$sample)] <- "Wang"
+df.activity.all$study[grepl("Abdelfattah", df.activity.all$sample)] <- "Abdelfattah"
+
+df.activity.all <- unique(bind_rows(df.activity.all)) # , df.wang.data df.glass.data
+
+
+df.activity.sum <- df.activity.all %>%
+  dplyr::group_by(PR, evasion_pathway, study) %>%
+  dplyr::summarise(activity.mean = mean(activity),
+                   activity.median = median(activity),
+                   active.mean = mean(active),
+                   pval = t.test(activity)$p.value)
+
+
+df.active.sum1 <- df.activity.all %>%
+  dplyr::group_by(PR, evasion_pathway, study, sample) %>%
+  dplyr::summarise(activity.mean = mean(activity),
+                   activity.median = median(activity),
+                   active.mean = mean(active)) 
+
+
+df.active.sum2 <- df.active.sum1 %>%
+  dplyr::ungroup() %>%
+  dplyr::group_by(PR, evasion_pathway, study) %>%
+  dplyr::summarise(activity.mean = mean(activity.mean),
+                   activity.median = median(activity.median),
+                   active.mean = mean(active.mean))
+
+df.active.sum2 <- df.active.sum1 %>%
+  dplyr::group_by(study, evasion_pathway) %>%
+  dplyr::mutate(active.mean = (active.mean - mean(active.mean))/sd(active.mean))
+
+pval.recurrence.g1 <- wilcox.test(active.mean ~ PR, data = df.active.sum2 %>% dplyr::filter(evasion_pathway %in% "G1_EVASION"))$p.value
+pval.recurrence.g2 <- wilcox.test(active.mean ~ PR, data = df.active.sum2 %>% dplyr::filter(evasion_pathway %in% "G2_EVASION"))$p.value
+
+df.active.sum3 <- df.active.sum2 %>%
+  dplyr::group_by(study, evasion_pathway, PR) %>%
+  dplyr::summarise(score.mean = median(active.mean))
+
+plt.recurrence <- df.active.sum2 %>%
+  ggplot(aes(x = PR, y = active.mean)) +
+  geom_boxplot(outlier.color = NA, fill = "grey95") + 
+  ggbeeswarm::geom_quasirandom(aes(fill = study), size= 2, pch = 21) + 
+  facet_wrap(~evasion_pathway) + 
+  labs(x = "Condition", y = "Immune Evasion Phenotype (Scaled)", 
+       title = "Immune Evasion at Recurrence", 
+       subtitle = paste0("G1 p = ", signif(pval.recurrence.g1, 3), ", G2 p = ", signif(pval.recurrence.g2, 3))) + 
+  theme_miko() + 
+  scale_fill_manual(values = c("Abdelfattah" = "black", "Mikolajewicz" = "white", "Wang" = "Grey60")) + 
+  theme(legend.position = "right") 
+
+plt.recurrence
+
+# savePDF(file.name = "Reboot12_Evasion_primary_vs_recurrent_boxplot_wide_300124.pdf", plt.recurrence, fig.width = 7, fig.height = 4)
+
+```
+
+
+
+```{r evaluate evasion pheotype pathway correlates, fig.width=8, fig.height=15}
+
+df.sim.all.long$PR <-  NA
+df.sim.all.long$PR[grepl("_P", df.sim.all.long$sample)] <- "Primary"
+df.sim.all.long$PR[grepl("_R", df.sim.all.long$sample)] <- "Recurrent"
+
+df.sim.all.long <- df.sim.all.long[complete.cases(df.sim.all.long), ]
+df.sim.all.long.sum <- df.sim.all.long %>%
+  dplyr::group_by(evasion_pathway, glioma_pathway) %>%
+  dplyr::summarize(r.median = median(r),
+                   p = wilcox.test(r)$p.value)
+
+df.sim.all.long %>%
+  dplyr::filter(evasion_pathway %in% "G1_EVASION") %>%
+  ggplot(aes(x = r, y = reorder(glioma_pathway, r))) + 
+  geom_boxplot(outlier.color = NA) + 
+  # scattermore::geom_scattermore() + 
+  facet_wrap(~evasion_pathway) + 
+  geom_vline(xintercept = 0, linetype = "dashed")
+
+
+df.sim.all.long %>%
+  dplyr::filter(evasion_pathway %in% "G2_EVASION") %>%
+  # dplyr::filter(!grepl("Gavish", glioma_pathway)) %>%
+  ggplot(aes(x = r, y = reorder(glioma_pathway, r))) + 
+  geom_boxplot(outlier.color = NA) + 
+  # scattermore::geom_scattermore() + 
+  facet_wrap(~evasion_pathway) + 
+  geom_vline(xintercept = 0, linetype = "dashed")
+
+
+```
+
+
+```{r intratumoral correlations between evasion phenotype and glioma associated pathways, fig.width=9, fig.height=7}
+
+df.sim.all.wide <- pivot_wider(df.sim.all.long %>% 
+                                  dplyr::group_by(evasion_pathway, glioma_pathway) %>%
+                                 dplyr::summarise(r.mean = mean(r),
+                                                  p = wilcox.test(r)$p.value), names_from = "evasion_pathway", values_from = c("r.mean", "p"))
+
+df.sim.all.wide$G1_EVASION <- df.sim.all.wide$r.mean_G1_EVASION
+df.sim.all.wide$G2_EVASION <- df.sim.all.wide$r.mean_G2_EVASION
+
+df.sim.all.wide$padj_G1_EVASION <- p.adjust(df.sim.all.wide$p_G1_EVASION, method = "bonferroni")
+df.sim.all.wide$padj_G2_EVASION <- p.adjust(df.sim.all.wide$p_G2_EVASION, method = "bonferroni")
+
+df.sim.all.wide$padj_pool <- df.sim.all.wide$padj_G1_EVASION
+df.sim.all.wide$padj_pool[df.sim.all.wide$padj_G2_EVASION < df.sim.all.wide$padj_G1_EVASION] <- df.sim.all.wide$padj_G2_EVASION[df.sim.all.wide$padj_G2_EVASION < df.sim.all.wide$padj_G1_EVASION]
+df.sim.all.wide$sig <- df.sim.all.wide$padj_G1_EVASION < 0.05 | df.sim.all.wide$padj_G2_EVASION < 0.05
+
+df.sim.all.wide %>%
+  ggplot(aes(x = G1_EVASION, y = G2_EVASION, color= sig, size = -log10(padj_pool))) +
+  geom_point(pch = 21, fill = "grey") + 
+  scale_color_manual(values = c("TRUE" = "black", "FALSE" =  "grey" )) + 
+  geom_hline(yintercept = 0, linetype = "dashed") + 
+  geom_vline(xintercept = 0, linetype = "dashed") + 
+  theme_miko() + 
+  theme(legend.position = "right")
+
+plt.pathways <- df.sim.all.wide %>%
+  ggplot(aes(x = G1_EVASION, y = G2_EVASION, color= sig, size = -log10(padj_pool))) +
+  geom_point(pch = 21, fill = "grey") + 
+  scale_color_manual(values = c("TRUE" = "black", "FALSE" =  "grey" )) + 
+  geom_hline(yintercept = 0, linetype = "dashed") + 
+  geom_vline(xintercept = 0, linetype = "dashed") + 
+  theme_miko() + 
+  theme(legend.position = "right")
+
+plt.pathways
+
+# savePDF("Reboot12_G1_vs_G2_correlatin_pathways_hsGBM_label_300124.pdf", plt.pathways, fig.width=9, fig.height=7)
+# savePDF("Reboot12_G1_vs_G2_correlatin_pathways_hsGBM_nolabel_300124.pdf", plt.pathways, fig.width=9, fig.height=7)
+```

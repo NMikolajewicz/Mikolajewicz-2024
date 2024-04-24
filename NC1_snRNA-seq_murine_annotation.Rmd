@@ -1,0 +1,1761 @@
+---
+title: "PR_GBM analysis 1"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output: 
+  flexdashboard::flex_dashboard:
+    orientation: rows
+    vertical_layout: fill
+    self_contained: true
+    source_code: embed
+    theme: 
+      bootswatch: flatly
+    navbar:
+      - { title: "scMiko", href: "https://nmikolajewicz.github.io/scMiko/" }   
+editor_options: 
+  chunk_output_type: inline
+knit: (function(inputFile, encoding) {
+    rmarkdown::render(input = inputFile,
+      encoding = encoding,
+      output_file = if (exists("user")){paste0(
+        xfun::sans_ext(inputFile), '_',user, "_", 
+        paste0(format(Sys.time(), "%d_%b_"), gsub(" ", "_", gsub(":", "_", format(Sys.time(), "%X"))), format(Sys.time(), "_%Y")), '.html'
+      )} else {paste0(xfun::sans_ext(inputFile), '_',"Guest", "_", 
+      paste0(format(Sys.time(), "%d_%b_"), gsub(" ", "_", gsub(":", "_", format(Sys.time(), "%X"))), format(Sys.time(), "_%Y")), '.html')},
+      output_dir = if (exists("data.path")) paste0(data.path, "/HTML_Reports") else NULL
+    )
+  })
+---
+
+
+
+```{r setup, include=FALSE}
+
+# clear global enviroment
+rm(list = setdiff(ls(), c("data.path", "user")))
+invisible({gc()})
+
+# initiate timer
+start.time <- proc.time()
+
+# List of packages to load
+packages2load <- c("Seurat", "sctransform",
+                   "dplyr", "tidyr", "RColorBrewer", "ggplot2", "gridExtra", 
+                   "DT", "flexdashboard", "future", "biomaRt", "foreach", "parallel", "doParallel", "scMiko", "reshape2", "glmGamPoi")
+# load packages
+invisible({lapply(packages2load, library, character.only = TRUE)})
+
+```
+
+
+```{r parameter specification}
+	
+parameter.list <- list(
+  input.file ="R726_M02_HH_SET1_allGBM_reboot_rPCA_integration_240322.Rdata",
+  
+  print.inline = T ,
+  update.log = F,
+  rprofile.dir = T,
+  developer = T
+)
+
+
+
+```
+
+
+```{r load data, warning = FALSE}
+
+# Specify data directories
+if (parameter.list$rprofile.dir){
+  
+  dir.preprocessed <- "Preprocessed_Datasets/"
+  dir.reference <- "Reference_Datasets/"
+  
+  if (!exists("data.path") & !exists("user")) {
+    stop("data.path and user variables do not exist in global enviroment. Ensure that these are specified in .Rprofile. If specified, try restarting Rstudio.")
+  }
+  
+}
+
+
+if (!("input.file" %in% names(parameter.list))) stop("input.file is not specified")
+
+# load query dataset
+miko_message("Importing data...")
+if ((!grepl(".Rdata|.RData", parameter.list$input.file)) & !(grepl(".rds", parameter.list$input.file))){
+  parameter.list$input.file <- paste0(parameter.list$input.file, ".Rdata")
+} 
+
+if (parameter.list$rprofile.dir){
+  if (grepl(".Rdata|.RData", parameter.list$input.file)){
+    load(paste(data.path, dir.preprocessed, parameter.list$input.file, sep = ""));
+  } else if (grepl(".rds", parameter.list$input.file)) {
+    so <- readRDS(paste(data.path, dir.preprocessed, parameter.list$input.file, sep = ""))
+  }  
+} else {
+  if (grepl(".Rdata|.RData", parameter.list$input.file)){
+    load(parameter.list$input.file);
+  } else if (grepl(".rds", parameter.list$input.file)) {
+    so <- readRDS(parameter.list$input.file);
+  }
+}
+
+
+if (!exists("gNames.list")) gNames.list <- prepGeneList(so, objects())
+
+t2d <- c("ica", "tsne", "nmf", "corr", "gsva", "deg", "integration.anchors")
+
+# prep seurat object
+prep.list <- prepSeurat2(so, e2s = gNames.list, 
+                         species = NULL, resolution= parameter.list$cluster.resolution, subset.data = NULL, 
+                         subsample = parameter.list$subsample_factor, 
+                         terms2drop = t2d, rmv.pattern = "so", keep.default.assay.only = F)
+
+# unpack results
+if (exists("so")) try({rm(so)}, silent = T)
+so.query <- prep.list$so
+current.assay <- prep.list$assay
+n.cells <- prep.list$n.cell
+rm(prep.list);
+invisible({gc()})
+
+# clean clusters
+# if (parameter.list$clean.clusters) so.query <- cleanCluster(so.query, return.plots = F)
+parameter.list$species <- detectSpecies(so.query)
+
+df.tally.orig <- as.data.frame(table(so.query@meta.data[ ,"seurat_clusters"]))
+# if (parameter.list$max.cells < ncol(so.query)){
+#   
+#   so.query <- downsampleSeurat(object = so.query,
+#                                subsample.n = parameter.list$max.cells,  sample.group = "seurat_clusters", min.group.size = 300)
+# }
+
+df.tally.sampled <- as.data.frame(table(so.query@meta.data[ ,"seurat_clusters"]))
+
+```
+
+
+```{r get cell barcodes}
+
+do.barcodes <- F
+
+if (do.barcodes){
+  
+  load(paste(data.path, dir.preprocessed, "R6_M02_BC2_allGBM_271020.Rdata", sep = ""));
+  c2b <- so@meta.data[["Barcode"]]
+  names(c2b) <- colnames(so)
+  so.query@meta.data$Barcode <- c2b[colnames(so.query)]
+  cluster.UMAP(so.query, "Barcode")
+  table(so@meta.data$Barcode)
+  table(so.query@meta.data$Barcode)
+  so <- so.query
+  save(so, gNames.list, df.log_Module_1, file = paste(data.path, dir.preprocessed, parameter.list$input.file, sep = ""))
+}
+
+# R6_M02_BC2_allGBM_271020.Rdata
+```
+
+
+```{r label transfer}
+
+
+do.transfer<- T
+
+if (do.transfer){
+
+transfer.list <- list(
+  immune_ochocka = T,
+  zeisel = T,
+  manno = T,
+  invitro = T
+)
+
+# helper function ##############################################################
+processSo <- function(object){
+  
+  
+  DefaultAssay(object) <- "RNA"
+  object <- DietSeurat(object, assays = "RNA", graphs = names(object@graphs),
+                       dimreducs = names(object@reductions))
+  object@assays[["RNA"]]@counts@Dimnames[[1]] <-make.unique(object@assays[["RNA"]]@counts@Dimnames[[1]])
+  object@assays[["RNA"]]@data@Dimnames[[1]] <-make.unique(object@assays[["RNA"]]@data@Dimnames[[1]])
+  
+  object@assays[["RNA"]]@meta.features <- data.frame(row.names = (rownames(object)))
+
+  object <- getMitoContent(object)
+  object <-    SCTransform(object = object,
+                           vars.to.regress = "percent.mt",
+                           verbose = T,
+                           return.only.var.genes = T,
+                           variable.features.n = NULL,
+                           variable.features.rv.th = 1.3,
+                           assay = "RNA",
+                           vst.flavor = "v2",
+                           method = "glmGamPoi",
+                           conserve.memory = F)
+  
+  
+  # scNormScale()
+  object <- RunPCA(object)
+    
+    
+   object <-  FindNeighbors(object)
+   object <- RunUMAP(object, dims = 1:30, return.model = T)
+  
+}
+
+# Immune #######################################################################
+if (transfer.list$immune_ochocka){
+  
+  load(paste0(data.path, "Preprocessed_Datasets/R643_M01_NM2_Ochocka2021_murineGBMimmune_210921.Rdata"));
+  
+  so.mm.immune <- so; rm(so)
+  
+  
+  barcode.list <- list(
+    Microglia = c(0:4, 5:8, 10, 11, 13:16, 20, 21, 23, 29),
+    Monocyte_Macrophage = c(26, 5, 9, 17),
+    Border_Associated_Macrophage = c(12, 19),
+    NKT = c(18, 25),
+    NK = c(24, 30, 32),
+    Bcell = 28,
+    Tcell = c(31, 22),
+    Neutrophil_DC = 27
+  )
+  
+  
+  so.mm.immune@meta.data$class <- NA
+  for (i in 1:length(barcode.list)){
+    so.mm.immune@meta.data$class[so.mm.immune@meta.data$seurat_clusters %in% barcode.list[[i]]] <- names(barcode.list)[i]
+  }
+  
+
+  
+    so.mm.immune <- downsampleSeurat(object = so.mm.immune, subsample.factor = 1, subsample.n = 30000)
+  so.mm.immune <- processSo(so.mm.immune)
+  
+    cluster.UMAP(so.mm.immune, "seurat_clusters")
+  cluster.UMAP(so.mm.immune, "class")
+}
+
+
+
+# Zeisel #######################################################################
+if (transfer.list$zeisel){
+  load("zeisel2018_mouse_neural_reference_010220.Rdata") 
+  so.ref <- so;
+  rm(so); invisible({gc()})
+  so.ref <- processSo(so.ref)
+  cluster.UMAP(so.ref, "seurat_clusters")
+  
+  so.ref@meta.data$Neurotransmitter.z <- make.names(so.ref@meta.data$Neurotransmitter.x)
+   cluster.UMAP(so.ref, "Neurotransmitter.z") + theme_miko()
+  # so.ref@meta.data[["Neurotransmitter.x"]]
+}
+
+
+# Manno ########################################################################
+if (transfer.list$manno){
+  load("development_mouse_neural_reference_all_060321.Rdata")
+  so.dev <- so;
+  rm(so); invisible({gc()})
+    so.dev <- downsampleSeurat(object = so.dev, subsample.factor = 1, subsample.n = 30000)
+  so.dev <- processSo(so.dev)
+  cluster.UMAP(so.dev, "seurat_clusters")
+
+}
+
+
+if (transfer.list$invitro){
+  load(paste(data.path, dir.preprocessed, "M01_NM2_R1_test_300720.Rdata", sep = ""));
+
+  
+  
+  load(paste(data.path, dir.preprocessed, "R103_M27_NM2_M02_p467891011_Mm_brain_invitroGBM_150920.Rdata", sep = ""));
+  so.invitro <- so;
+  # input.file <- "R103_M27_NM2_M02_p467891011_Mm_brain_invitroGBM_150920.Rdata"
+  
+  # so.invivo <- so.query[ ,so.query@meta.data$Barcode %in% c("06_GBM_PBSctrl", "2_27_PBSctrl")]
+  
+  # so.invivo <- merge(so.invivo, so.invitro)
+  rm(so); invisible({gc()})
+  so.invitro <- processSo(so.invitro)
+  cluster.UMAP(so.invitro, "seurat_clusters")
+cluster.UMAP(so.invitro, "Barcode")
+
+so.invitro@meta.data$class <- paste0("brain_", so.invitro@meta.data$seurat_clusters)
+so.invitro@meta.data$class[so.invitro@meta.data$Barcode %in% c("01_invitroCT2A")] <- "CT2A_invitro"
+so.invitro@meta.data$class[so.invitro@meta.data$Barcode %in% c("02_invitroGL261")] <- "GL261_invitro"
+cluster.UMAP(so.invitro, "class")
+}
+
+  
+}
+
+```
+
+
+```{r generate UMAP plots, fig.width=10, fig.height=10}
+
+
+label.size <- 2
+raster.dpi = c(512, 512)
+pt.size = 0.5
+do.raster <- T
+
+p1 <- cluster.UMAP(so.ref, "TaxonomyRank1.y", label.size = label.size, repel = T, raster = do.raster, raster.dpi = raster.dpi, pt.size = pt.size) + 
+  theme_miko() + theme_void() + theme(legend.position = "none") + 
+  labs(title = "Zeisel 2018", subtitle = "Level 1 Annotation")
+p2 <- cluster.UMAP(so.ref, "TaxonomyRank2.y", label.size = label.size, repel = T, raster = do.raster, raster.dpi = raster.dpi, pt.size = pt.size)  +
+  theme_miko() + theme_void() + theme(legend.position = "none") + 
+  labs(title = "Zeisel 2018", subtitle = "Level 2 Annotation")
+p3 <- cluster.UMAP(so.ref, "TaxonomyRank3.y", label.size = label.size, repel = T, raster = do.raster, raster.dpi = raster.dpi, pt.size = pt.size)  + 
+  theme_miko() + theme_void() + theme(legend.position = "none") + 
+  labs(title = "Zeisel 2018", subtitle = "Level 3 Annotation")
+p4 <- cluster.UMAP(so.ref, "TaxonomyRank4.y", label.size = label.size, repel = T, raster = do.raster, raster.dpi = raster.dpi, pt.size = pt.size)  + 
+  theme_miko() + theme_void() + theme(legend.position = "none") + 
+  labs(title = "Zeisel 2018", subtitle = "Level 4 Annotation")
+
+
+p.nt <- cluster.UMAP(so.ref, "Neurotransmitter.z", label.size = label.size, repel = T, raster = do.raster, raster.dpi = raster.dpi, pt.size = pt.size)  + 
+  theme_miko() + theme_void() + theme(legend.position = "none") + 
+  labs(title = "Zeisel 2018", subtitle = "Level 4 Annotation")
+
+p5 <- cluster.UMAP(so.dev, "Class", label.size = label.size, repel = T, raster = do.raster, raster.dpi = raster.dpi, pt.size = pt.size)  + 
+  theme_miko() + theme_void() + theme(legend.position = "none") + 
+  labs(title = "La Mannos 20XX", subtitle = "Level 1 Annotation")
+p6 <- cluster.UMAP(so.dev, "Subclass", label.size = label.size, repel = T, raster = do.raster, raster.dpi = raster.dpi, pt.size = pt.size)  + 
+  theme_miko() + theme_void() + theme(legend.position = "none") + 
+  labs(title = "La Mannos 20XX", subtitle = "Level 2 Annotation")
+
+p7 <- cluster.UMAP(so.mm.immune, "class", label.size = label.size, repel = T,raster = do.raster,  raster.dpi = raster.dpi, pt.size = pt.size)  + 
+  theme_miko() + theme_void() + theme(legend.position = "none") + 
+  labs(title = "Ochocka 20XX", subtitle = "Cell Type Annotation")
+
+plt.ref <- cowplot::plot_grid(p1, p2, p3, p4, p5, p6, p7, nrow = 1)
+
+# savePDF("Reboot1_refAtlases_umap_140523.pdf", plt.ref, fig.width=10*7, fig.height=10)
+
+```
+
+
+```{r annotate population}
+
+if (do.transfer){
+# Zeisel Labels ################################################################
+
+transfer.anchors <- FindTransferAnchors(reference = so.ref, 
+                                        query = so.query, 
+                                        normalization.method = "SCT",
+                                        reference.reduction = "pca",
+                                        )
+
+so.query <- MapQuery(anchorset = transfer.anchors, reference = so.ref, query = so.query, 
+    refdata = list(zeisel_class_1 = "TaxonomyRank1.y",
+                   zeisel_class_2 = "TaxonomyRank2.y",
+                   zeisel_class_3 = "TaxonomyRank3.y",
+                   zeisel_class_4 = "TaxonomyRank4.y",
+                   Neurotransmitter = "Neurotransmitter.z"), reference.reduction = "pca", reduction.model = "umap")
+
+
+# Manno Labels ################################################################
+transfer.anchors.dev <- FindTransferAnchors(reference = so.dev, 
+                                        query = so.query, 
+                                        normalization.method = "SCT",
+                                        reference.reduction = "pca"
+                                        )
+
+so.query <- MapQuery(anchorset = transfer.anchors.dev, reference = so.dev, query = so.query, 
+    refdata = list(manno_class_1 = "Class",
+                   manno_class_2 = "Subclass"), reference.reduction = "pca", reduction.model = "umap")
+
+
+# In vitro Labels ################################################################
+transfer.anchors.invitro <- FindTransferAnchors(reference = so.invitro, 
+                                        query = so.query, 
+                                        normalization.method = "SCT",
+                                        reference.reduction = "pca"
+                                        )
+
+so.query <- MapQuery(anchorset = transfer.anchors.invitro, reference = so.invitro, query = so.query, 
+    refdata = list(invitro_class_1 = "class"), reference.reduction = "pca", reduction.model = "umap")
+
+# Ochocka Labels ################################################################
+transfer.anchors.ochocka <- FindTransferAnchors(reference = so.mm.immune, 
+                                        query = so.query, 
+                                        normalization.method = "SCT",
+                                        reference.reduction = "pca"
+                                        )
+
+so.query <- MapQuery(anchorset = transfer.anchors.ochocka, reference = so.mm.immune, query = so.query, 
+    refdata = list(ochocka_class_1 = "class"), reference.reduction = "pca", reduction.model = "umap")
+
+# merge annotations ############################################################
+
+DefaultAssay(so.query) <- "integrated"
+so.query <- FindClusters(so.query, resolution = 1.5 )
+DefaultAssay(so.query) <- "SCT"
+
+manno_t1 <- so.query@assays[["prediction.score.manno_class_1"]]@data
+manno_t2 <- so.query@assays[["prediction.score.manno_class_2"]]@data
+
+zeisel_t1 <- so.query@assays[["prediction.score.zeisel_class_1"]]@data
+zeisel_t2 <- so.query@assays[["prediction.score.zeisel_class_2"]]@data
+zeisel_t3 <- so.query@assays[["prediction.score.zeisel_class_3"]]@data
+zeisel_t4 <- so.query@assays[["prediction.score.zeisel_class_4"]]@data
+
+invitro_t1 <- so.query@assays[["prediction.score.invitro_class_1"]]@data
+invitro_t1 <- invitro_t1[grepl("CT2A|GL261", rownames(invitro_t1)), ]
+
+ochocka_t1 <- so.query@assays[["prediction.score.ochocka_class_1"]]@data
+
+rownames(manno_t1) <- paste0("m1_",  make.names(rownames(manno_t1)))
+rownames(manno_t2) <- paste0("m2_",  make.names(rownames(manno_t2)))
+rownames(zeisel_t1) <- paste0("z1_",  make.names(rownames(zeisel_t1)))
+rownames(zeisel_t2) <- paste0("z2_",  make.names(rownames(zeisel_t2)))
+rownames(zeisel_t3) <- paste0("z3_",  make.names(rownames(zeisel_t3)))
+rownames(zeisel_t4) <- paste0("z4_",  make.names(rownames(zeisel_t4)))
+rownames(invitro_t1) <- paste0("invitro_",  make.names(rownames(invitro_t1)))
+rownames(ochocka_t1) <- paste0("o_",  make.names(rownames(ochocka_t1)))
+
+tall <- data.frame(t(rbind(rbind(rbind(rbind(rbind(rbind(rbind(manno_t1, manno_t2), zeisel_t1), zeisel_t2), zeisel_t3), zeisel_t4), invitro_t1), ochocka_t1)))
+tall_names <- colnames(tall)
+tall$cluster <- so.query@meta.data$seurat_clusters
+tall.long <- pivot_longer(data = tall, cols = tall_names)
+tall.long.sum <- tall.long %>% 
+  dplyr::group_by(cluster, name) %>%
+  dplyr::summarize(pred = mean(value))
+tall.wide.sum <- pivot_wider(tall.long.sum, names_from = "cluster",  values_from = "pred")
+tall.wide.sum <- col2rowname(tall.wide.sum, "name")
+
+
+}
+```
+
+
+
+```{r fig.height=14, fig.width=14}
+
+if (do.transfer){
+plt.hm <- miko_heatmap(tall.wide.sum, scale = "none", border_color = "grey60", fontsize_row  = 5)
+plt.hm <- miko_heatmap(tall.wide.sum, scale = "row", border_color = "grey60", fontsize_row  = 5)
+print(plt.hm)
+
+}
+
+# savePDF("Reboot1_heatmap_label_transfer_SET1_res0_1_v2_140523.pdf", plt.hm, fig.height=14, fig.width=10)
+```
+
+
+
+
+```{r annotate with spatial data}
+
+do.spatial <- T
+if (do.spatial){
+
+  input.file.murine <- "C:/Users/n mikolajewicz/Dropbox/PDF Projects - JM/Data/scRNA-seq/01_sci-RNA-seq3_Hong_Kevin_Jason/NM_HH/Spatial/data/10x_Adult_Mouse_Brain_FFPE"
+
+  so.ms <- Load10X_Spatial(
+    data.dir = input.file.murine,
+    filename = "filtered_feature_bc_matrix.h5"
+  )
+
+  # preprocess data ###############################################################
+
+  so.ms <- SCTransform(so.ms, assay = "Spatial", method = "glmGamPoi",vst.flavor = "v2",verbose = T)
+  
+  #Dimensionality reduction, clustering, and visualization
+  so.ms <- RunPCA(so.ms, assay = "SCT", verbose = FALSE)
+  so.ms <- FindNeighbors(so.ms, reduction = "pca", dims = 1:30)
+  so.ms <- FindClusters(so.ms, verbose = FALSE)
+  so.ms <- RunUMAP(so.ms, reduction = "pca", dims = 1:30)
+  
+  #visualization with overlay w image
+  p1 <- DimPlot(so.ms, reduction = "umap", label = TRUE)
+  p2 <- SpatialDimPlot(so.ms, label = TRUE, label.size = 5, pt.size.factor = 2)
+  # p1 + p2
+  pcluster <- cowplot::plot_grid(p1, p2, nrow = 1)
+  print(pcluster)
+  
+  
+  
+  # ensure clusters are available
+DefaultAssay(so.query) <- "integrated"
+so.query <- FindClusters(so.query, resolution = 0.1 )
+so.query <- FindClusters(so.query, resolution = 1.5 )
+DefaultAssay(so.query) <- "SCT"
+  
+    anchors <- FindTransferAnchors(reference = so.ms , 
+                                 query = so.query, normalization.method = "SCT", 
+                                 query.assay = "integrated", reference.assay = "SCT", 
+                                 recompute.residuals = T)
+    
+    
+    predictions.assay.spat <- TransferData(anchorset = anchors, refdata = paste0("c", so.ms$seurat_clusters), prediction.assay = F,
+                                         weight.reduction = so.query[["pca"]], dims = 1:30)
+    so.query$spatial_label <- predictions.assay.spat$predicted.id
+
+}
+
+# mouse, P56, coronal reference
+# http://atlas.brain-map.org/atlas?atlas=1&plate=100960240#atlas=1&plate=100960244&resolution=16.75&x=5408&y=4016&zoom=-4&structure=803
+
+# anatomy section ##############
+# miko_heatmap(predictions.assay.15@data)
+# cluster.UMAP(so.query, "integrated_snn_res.0.1")
+
+```
+
+```{r}
+
+  #visualization with overlay w image
+  p1 <- DimPlot(so.ms, reduction = "umap", label = TRUE)
+  p2 <- SpatialDimPlot(so.ms, label = TRUE, label.size = 5, pt.size.factor = 2)
+  pcluster <- cowplot::plot_grid(p1, p2, nrow = 1)
+
+    p2 <- SpatialDimPlot(so.ms, label = TRUE, label.size = 5, pt.size.factor = 2)
+    
+  p1 + theme_miko() + theme_void() + theme(legend.position = "none")
+  p2
+  
+  
+  # savePDF("Reboot1_spatial_p1_140523.pdf", p1 + theme_miko() + theme_void() + theme(legend.position = "none"), fig.width = 5, fig.height = 5)
+  # savePDF("Reboot1_spatial_p2_140523.pdf", p2, fig.width = 5, fig.height = 5)
+```
+
+```{r annotate neurotransmitter}
+
+cluster.UMAP(so.query, "predicted.Neurotransmitter")
+
+# glutamine
+exprUMAP(so.query, "Slc17a7") #SLC17A7;Vglut1
+exprUMAP(so.query, "Slc17a6") #SLC17A6;Vglut2
+exprUMAP(so.query, "Slc17a8") #SLC17A8;Vglut3
+
+# glycine
+exprUMAP(so.query, "Slc6a9") #SLC6a9;Glyt1
+exprUMAP(so.query, "Slc6a6") #SLC6a5;Glyt2
+
+```
+
+
+```{r annotate by receptor class}
+# ligand-gated ion channels 
+# https://www.nature.com/articles/nature05453#Sec21
+# 41586_2007_BFnature05453_MOESM9_ESM
+
+lgic.list <- list(
+  Ach = c('Chrna1', 'Chrna2', 'Chrna3', 'Chrna4', 'Chrna5', 'Chrna6', 'Chrna7', 'Chrna9', 'Chrna10', 'Chrnb1', 'Chrnb2', 'Chrnb3', 'Chrnb4', 'Chrnd', 'Chrne', 'Chrng'),
+  Gaba = c('Gabra1', 'Gabra2', 'Gabra3', 'Gabra4', 'Gabra5', 'Gabra6', 'Gabrb1', 'Gabrb2', 'Gabrb3', 'Gabrd', 'Gabre', 'Gabrg1', 'Gabrg2', 'Gabrg3', 'Gabrp', 'Gabrq', 'Gabrr1', 'Gabrr2', 'Gabrr3'),
+  Glycine = c('Glra1', 'Glra2', 'Glra3', 'Glra4', 'Glrb'),
+  Glutamate = c('Gria1', 'Gria2', 'Gria3', 'Gria4' , 'Grid1', 'Grid2', 'Grik1', 'Grik2', 'Grik3', 'Grik4', 'Grik5', 'Grin1', 'Grin2a', 'Grin2b', 'Grin2c', 'Grin2d', 'Grin3a', 'Grin3b'),
+  Seratonin = c('Htr3a', 'Htr3b'),
+  Purinergic = c('P2rx1', 'P2rx2', 'P2rx3', 'P2rx4', 'P2rx5', 'P2rx7', 'P2rxl1')
+)
+
+
+DefaultAssay(so.query) <- "SCT"
+lgic.list2 <- lapply(lgic.list, function(x) x[x %in% rownames(so.query)])
+
+ms.lgic <- runMS(so.query, genelist = lgic.list2, raster = T)
+
+ms.lgic$plot.list
+
+```
+
+
+```{r fig.width=12, fig.height=4}
+
+(p2 + theme_miko()) + 
+  (cluster.UMAP(so.query, "spatial_label") ) + 
+  (cluster.UMAP(so.query, "integrated_snn_res.0.1")  + theme_miko()) #integrated_snn_res.1.5 integrated_snn_res.0.1
+```
+
+```{r regional annotations, fig.width=6, fig.height=5}
+
+regional.list.01 <- list(
+  CTX = c(7, 1, 4, 19, 18, 9, 15, 20),  # cerebral cortex
+  CNU = c(3, 14, 25, 21, 16, 12, 2, 5),                 # cerebral nuclei (e.g., striatum, putamen)
+  HIP = c(17),                       # hippocampus
+  TH = c(11),                        # thalamus
+  UBQ = c(10, 8, 13, 6),             # ubiquitous
+  VEN = 22,                           # ventricle
+  GBM = 0
+)
+
+regional.list.15 <- list(
+  HIP = c(33, 34,32), # hippocampus
+  CTX = c(22, 50, 63),
+  HY = c(35, 53, 59, 52, 61, 71, 60, 70),   # hypothalamus
+  UBQ = c(58, 69),
+  CB = 52            # cerebellum
+  # GBM = 40
+)
+
+
+# so.query@meta.data$integrated_snn_res.0.1
+
+so.query <- recodeBarcode(so.query, barcode.recode = regional.list.01, 
+                          old.field.name = "integrated_snn_res.0.1", new.field.name = "region_main", exact.match = T)
+so.query <- recodeBarcode(so.query, barcode.recode = regional.list.15, 
+                          old.field.name = "integrated_snn_res.1.5", new.field.name = "region_sub", exact.match = T)
+
+which.switch <- unique(unlist(regional.list.15))
+so.query@meta.data$region <- so.query@meta.data$region_main
+so.query@meta.data$region[so.query@meta.data$integrated_snn_res.1.5 %in% which.switch] <- so.query@meta.data$region_sub[so.query@meta.data$integrated_snn_res.1.5 %in% which.switch]
+
+cluster.UMAP(so.query, "region")
+```
+```{r}
+so.query@meta.data$hl <- so.query@meta.data$spatial_label %in% c("c11") # revisit 7, 11
+
+
+cluster.UMAP(so.query, "hl")
+```
+
+```{r fig.width=8, fig.height=8}
+p2 + theme_miko()
+```
+
+
+```{r}
+cluster.UMAP(so.query, "region")
+```
+
+
+```{r}
+# TODO 
+
+
+# cluster.UMAP(so.ref, "TaxonomyRank4.y")
+
+# 1) non-malig vs. malig
+# 2) non-malig annotation (label transfer, la mannos, zeisel, ochocka)
+```
+
+
+
+```{r assign labels}
+
+
+
+DefaultAssay(so.query) <- "integrated"
+so.query <- FindClusters(so.query, resolution = 1.5)
+
+
+class.list <- list(
+  tumor = c(0, 4, 5, 9, 14, 18, 26, 28, 44, 54, 58, 69),
+  immune = c(7, 40, 68),
+  brain = c(1:3, 6, 8, 10:13, 15:17, 19:25, 27, 29:39, 41:43, 45:53, 55:57, 59:61, 63:67, 71)
+)
+which.missing <- 0:71
+which.missing <- which.missing[!(which.missing %in% unlist(class.list))]
+class.list$other <- which.missing
+
+
+type.list <- list(
+  tumor = c(0, 4, 5, 9, 14, 18, 26, 28, 44, 54, 58, 69),
+  immune = c(7, 40, 68),
+  neuroblast = 25,
+  opc = c(8, 56, 66),
+  astrocyte = c(11),
+  cortical_hippocampus = c(3, 10, 13, 15, 16, 17, 20, 21, 24, 27, 31, 32, 33, 34, 36, 41, 45, 55, 64, 65, 67),
+  forebrain_hindbrain = c(1,2, 6, 12, 19, 22, 23, 29:30, 35, 37:39, 42, 43, 46:53, 57, 59, 60, 61, 63, 71)
+)
+which.missing <- 0:71
+which.missing <- which.missing[!(which.missing %in% unlist(type.list))]
+type.list$other <- which.missing
+
+
+#IIN = inhibitory interneuron
+#EN = excitatory neuron
+sub.list <- list(
+  astrocyte = 11,
+  lymphoid = 40,
+  myeloid = 7,
+  immune = 68,
+  IIN = c(29, 30, 37, 39, 46, 47, 49, 51),
+  IIN_Nxph1_Kcnmb2 = c(22, 23, 50, 63), # check (50, 63)
+  neuroblast = 25,
+  neuron = c(1, 35, 42, 53, 59, 60, 61, 71),
+  chromaffin = c(43, 15, 20, 21), # check 15, 20, 21
+  neuron_cortex = c(3, 10, 16, 24, 31, 33, 34, 36, 41, 45, 55, 64, 65, 67, 13), # check 13
+  EN_cortex = 27,
+  melanocyte_neuron_cortex = 17,
+  glutamatergic_neuron = 38,
+  granule_neuron = 32,
+  IIN_Lgr6 = c(2, 48, 57),
+  EN_mesencephalon = 19,
+  retinal_progenitor = 52,
+  inh_glut_telencephalon_projecting_neuron_Rgs9 = 6,
+  inh_glut_telencephalon_projecting_neuron_chromaffin_Rgs9 = 12,
+  oligodendrocyte = c(8, 66),
+  opc = 56,
+  tumor_ct2a = c(5, 26, 28, 54, 58),
+  tumor_ct2a_antigen = c(14, 44),
+  tumor_ct2a_mes = c(0, 18),
+  tumor_ct2a_vasc = 9,
+  tumor_gl261 = 4
+)
+
+which.missing <- 0:71
+which.missing <- which.missing[!(which.missing %in% unlist(sub.list))]
+sub.list$other <- which.missing
+
+so.query <- recodeBarcode(so.query, barcode.recode = class.list, old.field.name = "seurat_clusters", new.field.name = "class", exact.match = T)
+so.query <- recodeBarcode(so.query, barcode.recode = type.list, old.field.name = "seurat_clusters", new.field.name = "type", exact.match = T)
+so.query <- recodeBarcode(so.query, barcode.recode = sub.list, old.field.name = "seurat_clusters", new.field.name = "subtype", exact.match = T)
+# so.query <- recodeBarcode
+
+cluster.UMAP(so.query, "integrated_snn_res.0.1")
+cluster.UMAP(so.query)
+cluster.UMAP(so.query, "class")
+cluster.UMAP(so.query, "type")
+cluster.UMAP(so.query, "subtype") + theme_miko()
+# gc()
+
+
+# DefaultAssay(so.query) <- "SCT"
+# exprUMAP(so.query, "Rbm38")
+# closeAllConnections()
+
+```
+
+
+```{r check cluster representation}
+
+df.tally <- data.frame(table(so.query@meta.data$integrated_snn_res.1.5, so.query@meta.data$Barcode))
+
+```
+
+
+
+```{r explore expression patterns}
+
+biExpr <- function(object, feature.x, feature.y){
+  x = as.vector(so.query@assays$SCT@data[rownames(so.query@assays$SCT@data) %in% feature.x, ])
+  y = as.vector(so.query@assays$SCT@data[rownames(so.query@assays$SCT@data) %in% feature.y, ])
+  return( x*y)
+}
+
+triExpr <- function(object, feature.x, feature.y,  feature.z){
+  x = as.vector(so.query@assays$SCT@data[rownames(so.query@assays$SCT@data) %in% feature.x, ])
+  y = as.vector(so.query@assays$SCT@data[rownames(so.query@assays$SCT@data) %in% feature.y, ])
+  z = as.vector(so.query@assays$SCT@data[rownames(so.query@assays$SCT@data) %in% feature.z, ]) 
+  return(x*y*z)
+}
+
+so.query@meta.data$coexpr <- biExpr(so.query, "March11", "Kit")#"Sv2b", "Il1rapl2"
+so.query@meta.data$coexpr <- triExpr(so.query,  "Dpyd", "Ndst4", 'Abi3bp' ) #"Lingo2", "Mdga2", "Fam19a1", "Pex5l", "Ldb2" 'Gm28928'
+DefaultAssay(so.query)<- "SCT"
+exprUMAP(so.query, "Gpx6", scale.color = "black")
+exprUMAP(so.query, "Kit", scale.color = "black")
+exprUMAP(so.query, "coexpr", scale.color = "black")
+
+```
+
+
+```{r annotation_v1 - short, fig.width=15, fig.height=12}
+
+# annotation harmonizing function
+harmonizeAnnotation <- function(object, reference.label, predicted.label){
+  
+  df.tally <- data.frame(table(object@meta.data[ ,reference.label], object@meta.data[ ,predicted.label])) 
+  
+  df.tally.sum <- df.tally %>% dplyr::group_by(Var1) %>% dplyr::summarize(cell = Var2[which.max(Freq)])
+  c2c <- df.tally.sum$cell
+  names(c2c) <- as.character(df.tally.sum$Var1)
+  
+  return(as.character(c2c[object@meta.data[ ,reference.label]]))
+}
+
+
+nm.list.01 <- list(
+  GBM = c(0),
+  GBM = 22,
+  immune = 6,
+  OD = 8,                    # oligodendrocyte
+  EN = c(1,4,15),    # cortical neurons
+  EN = c(17),
+  EN = c(7),
+  EN = 19, # check
+  IN = c(3),
+  IN = c(14),
+  # N_Adarb2 = c(12),
+  EN = 18,
+  IN = c(12),
+  IN = c(9, 16),
+  EN = 20,
+  IN = 5,
+  IN = c(2,  21),
+  OPC = 13,                   # neuroblast
+  AC = 10,                   # astrocyte
+  CP = 22
+  # Ninh_Rgs8 = c(14,3)                # inhibitory neuron
+)
+
+nm.list.15 <- list(
+  GBM = c(4),
+  GBM = 69,
+  GBM = c(9, 44),
+  GBM = c(0,14, 5, 26, 18, 28),
+  Myeloid = 7,
+  OD = 68,
+  Lymphoid = 40,
+  IN = c(53),
+  IN = c(29),
+  IN = c(39),
+  IN = c(49),
+  IN = c(37),
+  IN = c(47),
+  EN = 19,
+  EN = c(15, 24, 16),
+  EN = c(27, 34, 64),
+  EN = 20,
+  EN = c(36, 17),
+  EN = c(21),
+  EN = 3,
+  EN = c(45, 55),
+  EN = 62,
+  OPC = c(56),
+  OPC = c(25),
+  GN = 52, # granule neuron https://elifesciences.org/articles/37551/figures
+  N = 70
+)
+
+so.query <- recodeBarcode(so.query, barcode.recode = nm.list.01, 
+                          old.field.name = "integrated_snn_res.0.1", new.field.name = "class_nm_main", exact.match = T)
+so.query <- recodeBarcode(so.query, barcode.recode = nm.list.15, 
+                          old.field.name = "integrated_snn_res.1.5", new.field.name = "class_nm_sub", exact.match = T)
+
+which.switch <- unique(unlist(nm.list.15))
+so.query@meta.data$class_nm <- so.query@meta.data$class_nm_main
+so.query@meta.data$class_nm[so.query@meta.data$integrated_snn_res.1.5 %in% which.switch] <- so.query@meta.data$class_nm_sub[so.query@meta.data$integrated_snn_res.1.5 %in% which.switch]
+
+so.query@meta.data$region_class <- paste0(so.query@meta.data$region, "_", so.query@meta.data$class_nm)
+
+so.query@meta.data$region_class.clean <-  harmonizeAnnotation(object = so.query,
+                                                             reference.label = "integrated_snn_res.1.5", 
+                                                             predicted.label = "region_class")
+
+
+so.query@meta.data$region_class.clean2 <- paste0(so.query@meta.data$region_class.clean, "_", 
+                                                 so.query@meta.data$integrated_snn_res.0.1, ".", 
+                                                 so.query@meta.data$integrated_snn_res.1.5)
+  
+cluster.UMAP(so.query, "class_nm", label.size = 2, raster = F, pt.size = 0.01) + theme_miko()
+cluster.UMAP(so.query, "region_class.clean2", label.size = 2, raster = F, pt.size = 0.01) + theme_miko(legend = F)
+cluster.UMAP(so.query, "region_class.clean", label.size = 2, raster = F, pt.size = 0.01) + theme_miko(legend = F)
+```
+
+
+
+```{r annotation_v2 - extended, fig.width=10, fig.height=8}
+
+# annotation harmonizing function
+harmonizeAnnotation <- function(object, reference.label, predicted.label){
+  
+  df.tally <- data.frame(table(object@meta.data[ ,reference.label], object@meta.data[ ,predicted.label])) 
+  
+  df.tally.sum <- df.tally %>% dplyr::group_by(Var1) %>% dplyr::summarize(cell = Var2[which.max(Freq)])
+  c2c <- df.tally.sum$cell
+  names(c2c) <- as.character(df.tally.sum$Var1)
+  
+  return(as.character(c2c[object@meta.data[ ,reference.label]]))
+}
+
+
+nm.list.01 <- list(
+  GBM = c(0),
+  GBM_Ttr = 22,
+  immune = 6,
+  OD_Plp1 = 8,                    # oligodendrocyte
+  EN = c(1,4,15),    # cortical neurons
+  EN_Ahcyl2_Slc7a14 = c(17),
+  EN_Gm15338_Foxp2 = c(7),
+  EN_Gm15338_Vwc2l = 19, # check
+  IN_Foxp2_Ppp1r1b = c(3),
+  IN_Foxp2_Erbb4 = c(14),
+  # N_Adarb2 = c(12),
+  EN_Tmem163_Rbm20 = 18,
+  IN_Adarb2_Vip = c(12),
+  IN_Kcnmb2_Nxph1 = c(9, 16),
+  EN_Oprk1_Nr4a2 = 20,
+  IN_Cpa6_Gad1 = 5,
+  IN = c(2,  21),
+  OPC = 13,                   # neuroblast
+  AC_Slc39a12_Clu = 10,                   # astrocyte
+  CP_Ace_Sostdc1 = 22
+  # Ninh_Rgs8 = c(14,3)                # inhibitory neuron
+)
+
+nm.list.15 <- list(
+  GBM_DEV_Moxd1 = c(4),
+  GBM_Cilia_Cfap44 = 69,
+  GBM_Cycle = c(9, 44),
+  GBM_MES = c(0,14, 5, 26, 18, 28),
+  Myeloid_Cx3cr1 = 7,
+  OD_Plp1_Cx3cr1 = 68,
+  Lymphoid = 40,
+  IN_Kcnmb2_Nxph1 = c(53),
+  IN_Adarb2_Vip = c(29),
+  IN_Pde11a_Gad2 = c(39),
+  IN_Stac_Lgr5 = c(49),
+  IN_Pde1c_Kcnmb2_Spon1 = c(37),
+  IN_Ndnf_Klhl1 = c(47),
+  EN.motor_Synpo2_Lef1 = 19,
+  EN_Sv2b_Il1rapl2_Gm28928 = c(15, 24, 16),
+  EN_Ndst3_Iqgap2_Gm27247 = c(27, 34, 64),
+  EN_Pld5_Kcnh5_Prr16 = 20,
+  EN_Dpyd_Ndst4 = c(36, 17),
+  EN_Dpyd_Adamtsl1_Ak5 = c(21),
+  EN_Rasgrf2_Rgs6_Camk2a = 3,
+  EN_Tshz2_Kcnh5_Ndst3 = c(45, 55),
+  EN_Tshz2_Parm1_Herc3 = 62,
+  OPC_Plp1 = c(56),
+  OPC_Pdgfra = c(25),
+  GN_Fat2_Gabra6 = 52, # granule neuron https://elifesciences.org/articles/37551/figures
+
+  N_Sim1_Dach2 = 70
+  # CP = 54 #choroid plexus
+)
+
+so.query <- recodeBarcode(so.query, barcode.recode = nm.list.01, 
+                          old.field.name = "integrated_snn_res.0.1", new.field.name = "class_nm_main", exact.match = T)
+so.query <- recodeBarcode(so.query, barcode.recode = nm.list.15, 
+                          old.field.name = "integrated_snn_res.1.5", new.field.name = "class_nm_sub", exact.match = T)
+
+which.switch <- unique(unlist(nm.list.15))
+so.query@meta.data$class_nm <- so.query@meta.data$class_nm_main
+so.query@meta.data$class_nm[so.query@meta.data$integrated_snn_res.1.5 %in% which.switch] <- so.query@meta.data$class_nm_sub[so.query@meta.data$integrated_snn_res.1.5 %in% which.switch]
+
+so.query@meta.data$region_class <- paste0(so.query@meta.data$region, "_", so.query@meta.data$class_nm)
+
+so.query@meta.data$region_class.clean <-  harmonizeAnnotation(object = so.query,
+                                                             reference.label = "integrated_snn_res.1.5", 
+                                                             predicted.label = "region_class")
+
+
+so.query@meta.data$region_class.clean2 <- paste0(so.query@meta.data$region_class.clean, "_", 
+                                                 so.query@meta.data$integrated_snn_res.0.1, ".", 
+                                                 so.query@meta.data$integrated_snn_res.1.5)
+  
+cluster.UMAP(so.query, "class_nm", label.size = 2, raster = F, pt.size = 0.01) + theme_miko()
+cluster.UMAP(so.query, "region_class.clean2", label.size = 2, raster = F, pt.size = 0.01) + theme_miko(legend = F)
+
+```
+
+
+
+```{r harmonize labels}
+
+# Nt assignments
+df.nt.tally <- data.frame(table(so.query@meta.data$integrated_snn_res.1.5, so.query@meta.data$predicted.Neurotransmitter))
+colnames(df.nt.tally) <- c("cluster", "nt", "n")
+df.nt.tally <- df.nt.tally %>% dplyr::group_by(cluster) %>% dplyr::summarise(nt.max = nt[which.max(n)])
+df.nt.tally$nt.label <- ""
+
+df.nt.tally$nt.label[grepl("GABA", df.nt.tally$nt.max)] <- "GABA"
+df.nt.tally$nt.label[grepl("Glutamate", df.nt.tally$nt.max)] <- "Glu"
+df.nt.tally$nt.label[grepl("Glycine", df.nt.tally$nt.max)] <- "Gly"
+df.nt.tally$nt.label[grepl("oxide", df.nt.tally$nt.max)] <- "NO"
+df.nt.tally$nt.label[grepl("GABA", df.nt.tally$nt.max) & grepl("Glycine", df.nt.tally$nt.max)] <- "GABA.Gly"
+df.nt.tally$nt.label[grepl("Glutamate", df.nt.tally$nt.max) & grepl("Glycine", df.nt.tally$nt.max)] <- "Glu.Gly"
+df.nt.tally$nt.label[grepl("GABA", df.nt.tally$nt.max) & grepl("oxide", df.nt.tally$nt.max)] <- "GABA.NO"
+df.nt.tally$nt.label[grepl("Glutamate", df.nt.tally$nt.max) & grepl("oxide", df.nt.tally$nt.max)] <- "Glu.NO"
+df.nt.tally$nt.label[grepl("Glutamate", df.nt.tally$nt.max) & grepl("GABA", df.nt.tally$nt.max)] <- "Glu.GABA"
+
+# region 
+df.region.tally <- data.frame(table(so.query@meta.data$integrated_snn_res.1.5, so.query@meta.data$region))
+colnames(df.region.tally) <- c("cluster", "region", "n")
+df.region.tally <- df.region.tally %>% dplyr::group_by(cluster) %>% dplyr::summarise(region.max = region[which.max(n)])
+
+# class 
+df.class.tally <- data.frame(table(so.query@meta.data$integrated_snn_res.1.5, so.query@meta.data$class_nm))
+colnames(df.class.tally) <- c("cluster", "class", "n")
+df.class.tally <- df.class.tally %>% dplyr::group_by(cluster) %>% dplyr::summarise(class.max = class[which.max(n)])
+
+
+
+df.label.all <- merge(merge(df.nt.tally, df.region.tally, by = "cluster"), df.class.tally, by = "cluster")
+df.label.all$nt.label <- as.character(df.label.all$nt.label)
+df.label.all$region.max <- as.character(df.label.all$region.max)
+df.label.all$class.max <- as.character(df.label.all$class.max)
+df.label.all$nt.label[df.label.all$region.max %in% "UBQ"] <- ""
+df.label.all$region.max[df.label.all$region.max == df.label.all$class.max] <- ""
+
+# df.label.all$label1 <- paste0(df.label.all$class.max, "_", df.label.all$region.max, "_", df.label.all$nt.label)
+df.label.all$label1 <- paste0(df.label.all$region.max, "_", df.label.all$nt.label)
+df.label.all$label1 <- gsub("__", "_", df.label.all$label1)
+df.label.all$label1 <- gsub("UBQ_", "", df.label.all$label1)
+
+
+c2l <- df.label.all$label1
+# c2l <- df.label.all$region.max
+names(c2l) <- as.character(df.label.all$cluster)
+so.query@meta.data$mix_label <- c2l[as.character(so.query@meta.data$integrated_snn_res.1.5)]
+
+so.query@meta.data$mix_label <- paste0(so.query@meta.data$mix_label, "_", so.query@meta.data$integrated_snn_res.1.5)
+
+```
+
+
+```{r markers of interest}
+texttheme <-  theme(plot.subtitle=element_text(size=10, color="black")) +
+  theme(plot.title =element_text(size=15, face="italic", color="black"))
+
+plt.gad1 <- exprUMAP(so.query, "Gad1") + labs(subtitle  = "GABAergic") + texttheme
+plt.gad2 <- exprUMAP(so.query, "Gad2")   + labs(subtitle  = "GABAergic") + texttheme
+plt.Slc32a1 <- exprUMAP(so.query, "Slc32a1")   + labs(subtitle  = "GABAergic") + texttheme
+
+plt.Slc17a7 <- exprUMAP(so.query, "Slc17a7") + labs(subtitle  = "Glutamatergic") + texttheme
+plt.Slc17a6 <- exprUMAP(so.query, "Slc17a6") + labs(subtitle  = "Glutamatergic") + texttheme
+
+plt.Postn <- exprUMAP(so.query, "Postn") + labs(subtitle  = "CT2A Subpopulation") + texttheme
+plt.Rfx6 <- exprUMAP(so.query, "Rfx6") + labs(subtitle  = "GL261 Tumor") + texttheme
+plt.Scn4b <- exprUMAP(so.query, "Scn4b") + labs(subtitle  = "Neural") + texttheme
+plt.Cx3cr1 <- exprUMAP(so.query, "Cx3cr1") + labs(subtitle  = "Myeloid") + texttheme
+plt.Hapln2 <- exprUMAP(so.query, "Hapln2") + labs(subtitle  = "Oligodendrocyte") + texttheme
+plt.Etnppl <- exprUMAP(so.query, "Etnppl") + labs(subtitle  = "Astrocyte") + texttheme
+plt.Sst <- exprUMAP(so.query, "Sst") + labs(subtitle  = "Neural") + texttheme
+plt.Pdgfra <- exprUMAP(so.query, "Pdgfra") + labs(subtitle  = "OPC") + texttheme
+
+plt.Vip <- exprUMAP(so.query, "Vip") + labs(subtitle  = "Neural") + texttheme
+plt.Cdhr1 <- exprUMAP(so.query, "Cdhr1") + labs(subtitle  = "Neural") + texttheme
+plt.Il18r1 <- exprUMAP(so.query, "Il18r1") + labs(subtitle  = "Lymphoid") + texttheme
+plt.Th <- exprUMAP(so.query, "Th") + labs(subtitle  = "Dopaminergic") + texttheme
+plt.Fat2 <- exprUMAP(so.query, "Fat2") + labs(subtitle  = "Cerebellar Granule Neurons") + texttheme
+plt.Six3 <- exprUMAP(so.query, "Six3") + labs(subtitle  = "Neural") + texttheme
+
+plt.Tmem72 <- exprUMAP(so.query, "Tmem72") + labs(subtitle  = "Choroid Plexus") + texttheme
+plt.Frzb <- exprUMAP(so.query, "Frzb") + labs(subtitle  = "Fibroblast-like") + texttheme
+
+
+
+plt.Postn
+plt.gad1
+plt.gad2
+plt.Slc32a1
+
+plt.Slc17a7
+plt.Slc17a6
+
+plt.Cx3cr1
+plt.Scn4b
+plt.Hapln2
+plt.Etnppl
+plt.Pdgfra
+plt.Vip
+plt.Cdhr1
+plt.Il18r1
+plt.Th
+plt.Fat2
+plt.Six3
+plt.Tmem72
+# 
+# plt.Gdpd4
+
+specific.markers <- list(
+  Postn = 0,
+  Rfx6 = 4,
+  Scn4b = 6,
+  Cx3cr1 = 7,
+  Hapln2 = 8,
+  Etnppl = 11,
+  Sst = 23,
+  Pdgfra = 25,
+  Vip = 29,
+  Cdhr1 = 38,
+  Il18r1 = 40,
+  Th = 49,
+  Fat2 = 52,
+  Six3 = 53,
+  Tmem72 = 54,
+  Gdpd4 = 58,
+  Chat = 60,
+  Cfap44 = 69
+)
+
+
+```
+
+```{r visualize celltype=markers}
+
+# strong glial marker (AC + OPC): Hepacam
+
+# gabergic neurons
+exprUMAP(so.query, "Gad1") 
+exprUMAP(so.query, "Gad2")  
+exprUMAP(so.query, "Slc32a1")
+
+# glutaminergic neurons
+exprUMAP(so.query, "Slc17a7")
+exprUMAP(so.query, "Slc17a6")
+
+# interneurons 
+exprUMAP(so.query, "Pvalb")
+exprUMAP(so.query, "Vip")
+
+
+exprUMAP(so.query, "Hcn1")
+exprUMAP(so.query, "Ddc")
+exprUMAP(so.query, "Colec11") 
+exprUMAP(so.query, "Vtn")
+exprUMAP(so.query, "Gpr84") 
+
+```
+
+```{r get differentially expressed genes and annotate}
+
+df.deg <- getDEG(so.query, group_by = "integrated_snn_res.1.5", assay = "SCT", return.all = T, return.list = F)
+
+df.deg$group <- as.numeric(as.character(df.deg$group))
+df.deg.a <- df.deg %>% dplyr::filter(group %in% 68, specificity != 1)
+df.deg.a <- df.deg.a %>% dplyr::filter(sensitivity > 0.05, specificity> 0.999)
+
+goi <- df.deg.a$feature[df.deg.a$sensitivity > 0.05 & df.deg.a$specificity> 0.98]
+
+hg.res <- runHG(gene.list = list(a = goi), gene.universe = rownames(so.query), species = "Mm")
+hg.sum <- summarizeHG(hg.res, show.n = 10)
+hg.sum$plots
+
+df.deg.top <- df.deg %>% dplyr::group_by(group) %>% dplyr::filter(specificity != 1, sensitivity > 0.1, !grepl("Rik|Gm|Cx", feature)) %>% dplyr::top_n(1, rank(specificity, ties.method = "random"))
+
+```
+
+
+```{r fig.width=12, fig.height=12}
+
+specific.markers <- list(
+  Postn = 0,
+  Rfx6 = 4,
+  Scn4b = 6,
+  Cx3cr1 = 7,
+  Hapln2 = 8,
+  Etnppl = 11,
+  Sst = 23,
+  Pdgfra = 25,
+  Vip = 29,
+  Cdhr1 = 38,
+  Il18r1 = 40,
+  Th = 49,
+  Fat2 = 52,
+  Six3 = 53,
+  Tmem72 = 54,
+  Frzb = 58,
+  Chat = 60,
+  Cfap44 = 69
+)
+
+Additional.labels <- list(
+  CNU_Glu.GABA_1 = 1,
+  CNU_DA_49 = 49, #Th
+  HY_Chol_60 = 60, # Chat, Slc5a7
+  VEN.CP_meningeal_54 = 54, # Kl, Cldn2 (CP = choroid plexus); Ptgds  = meningeal
+  VEN.Fibro_58 = 58,
+  VEN.Ependymal_69 = 69, #Cfap44
+  GLIA_AC_11 = 11,
+  GLIA_OD_8 = 8,
+  GLIA_OPC_56 = 56,
+  GLIA_OPC_25 = 25,
+  IMMUNE_Myeloid_7 = 7,
+  IMMUNE_Lymphoid_40 = 40,
+  IMMUNE_Myeloid_68 = 68,
+  GBM_CT2A_44 = 44,
+  GBM_CT2A_9 = 9,
+  GBM_CT2A_0 = 0,
+  GBM_CT2A_26 = 26,
+  GBM_CT2A_28 = 28,
+  GBM_CT2A_18 = 18,
+  GBM_CT2A_14 = 14,
+  GBM_CT2A_5 = 5,
+  GBM_GL261_4 = 4
+)
+
+
+so.query@meta.data$mix_label2 <- so.query@meta.data$mix_label
+
+for (i in 1:length(Additional.labels)){
+  
+  so.query@meta.data$mix_label2[so.query@meta.data$integrated_snn_res.1.5 %in% Additional.labels[[i]]] <- names(Additional.labels)[i]
+}
+
+
+so.query@meta.data$mix_label2 <- gsub("__", "_", so.query@meta.data$mix_label2)
+
+
+plt.annotation.umap <- cluster.UMAP(so.query, "mix_label2", label.size = 3) + theme_miko()
+
+plt.annotation.umap <- plt.annotation.umap + labs(title = "Murine Brain Atlas", subtitle = "GL261/CT2A engrafted")
+plt.annotation.umap
+```
+
+
+
+```{r}
+
+
+class.labels <- list(
+  Cortical = "CTX",
+  Hippocampal = "HIP",
+  Cerebellar = "CB",
+  Cerebral_Nuclei = "CNU",
+  Hypothalamic = "HY",
+  Thalamic = "TH",
+  Glia = "GLIA",
+  GBM = "GBM", 
+  Immune = "IMMUNE",
+  Ventricle = "VEN"
+)
+
+
+so.query <- recodeBarcode(so.query, barcode.recode = class.labels, old.field.name = "mix_label2", new.field.name = "class", exact.match = FALSE)
+cluster.UMAP(so.query, "class")
+
+df.umap <- getUMAP(so.query)[["df.umap"]]
+
+plt.region <- df.umap %>%
+    ggplot(aes(x = x, y = y, color = class)) + 
+    scattermore::geom_scattermore(pointsize = 0.1, pixels = c(512*2, 512*2)) + 
+    theme_miko(legend = F) + 
+    labs(title = "Regional") + 
+    theme_void() + 
+    theme(legend.position = "none")
+plt.region
+
+  # savePDF("Reboot1_regional_UMAP_120512.pdf",  plt.region,  fig.width=4, fig.height=4)
+
+```
+
+
+
+```{r between class-markers}
+
+deg.class <- getDEG(so.query,assay = "SCT", group_by = "class", return.all = T, return.list = F)
+deg.class.all <- deg.class
+deg.class <-  deg.class.all %>% dplyr::filter(logFC > 0.5, pct.dif > 0, auc > 0.5, padj < 0.01, !grepl("mt-|Rik|Gm", feature))
+
+deg.class.auc <- deg.class %>%
+  dplyr::group_by(group) %>%
+  dplyr::filter(sensitivity > 0.1) %>% dplyr::top_n(2, ss)
+
+deg.cluster <- getDEG(so.query,assay = "SCT", group_by = "mix_label2", return.all = T, return.list = F)
+deg.cluster.all <- deg.cluster
+deg.cluster <- deg.cluster %>% dplyr::filter(logFC > 0.5, pct.dif > 0, auc > 0.5, padj < 0.01,!grepl("mt-|Rik|Gm", feature))
+
+# write.csv(x = deg.class.all %>% dplyr::filter(padj < 0.05, logFC > 0.2), file = "DEG_class_wilcoxon_5FDR_02LFC_140523.csv")
+# write.csv(x = deg.cluster.all %>% dplyr::filter(padj < 0.05, logFC > 0.2), file = "DEG_subclass_wilcoxon_5FDR_02LFC)140523.csv")
+
+
+top.n.cluster.markers <- 2
+deg.cluster.top <- deg.cluster %>% dplyr::group_by(group) %>% dplyr::filter(sensitivity > 0.1) %>% dplyr::top_n(top.n.cluster.markers, ss)
+
+
+cdi.class <- findCDIMarkers(object = so.query, features.x = "class", geosketch.subset = T)
+cdi.cluster <- findCDIMarkers(object = so.query, features.x = "mix_label2", geosketch.subset = T)
+
+
+cdi.class.top <- cdi.class %>% dplyr::group_by(feature.x) %>% dplyr::top_n(top.n.cluster.markers, ncdi) %>% dplyr::filter(ncdi != 0)
+cdi.cluster.top <- cdi.cluster %>% dplyr::group_by(feature.x) %>% dplyr::top_n(top.n.cluster.markers, ncdi) %>% dplyr::filter(ncdi != 0)
+
+# write.csv(x = cdi.class %>% dplyr::filter(fdr < 0.05), file = "DEG_class_cdi_5FDR_140523.csv")
+# write.csv(x = cdi.cluster %>% dplyr::filter(fdr < 0.05), file = "DEG_subclass_cdi_5FDR_140523.csv")
+# write.csv(deg.class, file = "SET1_class_DEGs_220422.csv")
+# write.csv(deg.cluster, file = "SET1_subclass_DEGs_220422.csv")
+```
+
+```{r prep dot plot}
+
+
+prepDot <- function(object, which.genes, which.idents = "seurat_clusters"){
+  
+  orig.idents <- Idents(object)
+  Idents(object) <- which.idents
+  plt.dot.seurat <- DotPlot(
+    object = object,
+    assay = DefaultAssay(object),
+    features = which.genes,
+    cols = c("lightgrey", "tomato"),
+    col.min = -2.5,
+    col.max = 2.5,
+    dot.min = 0,
+    dot.scale = 6,
+    idents = NULL,
+    group.by = NULL,
+    split.by = NULL,
+    cluster.idents = T,
+    scale = TRUE,
+    scale.by = "radius",
+    scale.min = NA,
+    scale.max = NA
+  )
+  
+  Idents(object) <- orig.idents
+  
+  df.class.dot <- plt.dot.seurat[["data"]]
+  
+  
+  # df.class.dot
+  df.class.dot$features.plot <- as.character(df.class.dot$features.plot)
+  df.class.dot$id <- as.character(df.class.dot$id)
+  df.class.dot.wide <- pivot_wider(data = df.class.dot %>% dplyr::select(c("features.plot", "avg.exp.scaled", "id")), 
+                                   names_from = "features.plot", values_from = "avg.exp.scaled")
+  df.class.dot.wide <- col2rowname(df.class.dot.wide, "id")
+  
+  cluster.dend <- hclust(d = dist(x = df.class.dot.wide))
+  gene.dend <- hclust(d = dist(x =t(df.class.dot.wide) ))
+  
+  cluster.order <- cluster.dend$order
+  gene.order <- gene.dend$order
+  df.class.dot$id <- factor(df.class.dot$id, levels = rownames(df.class.dot.wide)[cluster.order] )
+  df.class.dot$features.plot <- factor(df.class.dot$features.plot, levels = colnames(df.class.dot.wide)[gene.order] )
+  
+  return(list(
+    dat = df.class.dot,
+    cluster.dend = cluster.dend,
+    gene.dend = gene.dend
+  ))
+}
+
+marker.genes <- unique(c(deg.cluster.top$feature, deg.class.auc$feature))
+
+marker.genes <- unique(c(deg.cluster.top$feature, deg.class.auc$feature, cdi.class.top$feature.y, cdi.cluster.top$feature.y))
+
+
+
+marker.genes <- unique(c(marker.genes, names(specific.markers), 'Gad1', 'Gad2', 'Slc32a1', 'Slc17a7', 'Slc17a6', 'P2ry12'))
+df.class.dot.list <- prepDot(so.query, 
+                                  which.genes = marker.genes,  
+                                  which.idents = "mix_label2")
+
+df.class.dot.between <- df.class.dot.list$dat
+
+```
+
+```{r color palette}
+
+
+getCol <- function(dat, class.levels = NULL){
+  
+  if (!is.null(class.levels)){
+    u.class <- class.levels
+  } else {
+    u.class <- unique(dat$cluster.id)
+  }
+  
+  cluster.pal <- data.frame(
+    cluster.id = c( u.class),
+    pal =hue_pal()(length(u.class))
+  )
+  
+  dat <- merge(cluster.pal, dat, by = "cluster.id")
+  u.col = unique(dat$pal)
+  dat$seurat_clusters <- as.character(dat$seurat_clusters)
+  
+  c1 <- c()
+  c2 <- c()
+  for (i in 1:length(u.col)){
+    cluster.pal.cur <- dat %>% dplyr::filter(pal %in% u.col[i])
+    cur.colr <- tinter::tinter(u.col[i], steps = nrow(cluster.pal.cur), crop = 1, direction = "tints", adjust = -0.1) #0.15
+    
+    if (nrow(cluster.pal.cur) == length(cur.colr)){
+      c1 <-  c(c1, cur.colr)
+      c2 <-  c(c2, cluster.pal.cur$seurat_clusters)
+    } else {
+      c1 <-  c(c1, cur.colr[(length(cur.colr)-nrow(cluster.pal.cur)):length(cur.colr)])
+      c2 <-  c(c2, cluster.pal.cur$seurat_clusters)    
+    }
+  }
+  col.values <- c1
+  names(col.values) <- c2
+  
+  return(list(pal = col.values, class2col = cluster.pal))
+  
+}
+
+df.tally <- data.frame(class = (so.query@meta.data[["class"]]), seurat_clusters = so.query@meta.data[["mix_label2"]]) 
+
+df.tally.summary <- df.tally %>%
+  dplyr::group_by(seurat_clusters, class) %>%
+  dplyr::tally() %>%
+  dplyr::ungroup() %>%
+  dplyr::group_by(seurat_clusters) %>%
+  dplyr::mutate(prop = n/sum(n)) 
+
+
+df.cluster.id <- df.tally.summary %>%
+  dplyr::group_by(seurat_clusters) %>%
+  dplyr::summarize(
+    max.score = max(prop),
+    cluster.id = class[which.max(prop)]
+  )
+
+col.list  <- getCol(df.cluster.id, levels(so.query@meta.data$class))
+col.values <- col.list$pal
+
+```
+
+```{r final annotated UMAP, fig.width=12, fig.height=12}
+
+
+plt.subclass.umap <-  cluster.UMAP(so.query,group.by = "mix_label2", pt.size = 0.01, include.labels = T,label.size = 3) +
+  theme_miko(legend = F, center.title = T) + labs(caption = "", subtitle = "clusters") +
+  scale_color_manual(values= col.values)  + labs(title = "Murine Brain Atlas", subtitle = "GL261/CT2A engrafted")
+
+
+plt.class.umap <-   cluster.UMAP(so.query,  include.labels = F,group.by = "class") + labs(title = "Murine Brain Atlas (Major Classes)", subtitle = "GL261/CT2A engrafted")
+
+
+df.umap <- getUMAP(so.query)[["df.umap"]]
+df.umap.sum <- df.umap %>%
+  dplyr::group_by(mix_label2) %>%
+  dplyr::summarize(
+    x.mean = median(x),
+    y.mean = median(y)
+  )
+
+plt.subclass.umap <- df.umap %>%
+    ggplot(aes(x = x, y = y, color = mix_label2)) + 
+    scattermore::geom_scattermore(pointsize = 0.5, pixels = c(512*4, 512*4)) + 
+  scale_color_manual(values= col.values) + 
+    theme_miko(legend = F) + 
+    labs(title = "Regional") + 
+  geom_point(data = df.umap.sum, aes(x = x.mean, y = y.mean, color = mix_label2), pch = 21, color = "black", size = 0.7, stroke = 0.05) + 
+  ggrepel::geom_text_repel(data = df.umap.sum, aes(x = x.mean, y = y.mean, label = mix_label2), max.overlaps = Inf, color = "black",
+                           min.segment.length = 5, size = 1, stroke = 0.05) +
+    theme_void() + 
+    theme(legend.position = "none")
+plt.subclass.umap
+
+# savePDF("Reboot1_SET1_subclass_umap_130523.pdf", plt.subclass.umap, fig.width=12, fig.height=12)
+# savePDF("Reboot1_SET1_subclass_umap_labs_130523.pdf", plt.subclass.umap, fig.width=4, fig.height=4)
+# savePDF("Reboot1_SET1_subclass_umap_small_labs_v4_130523.pdf", plt.subclass.umap, fig.width=4, fig.height=4)
+# savePDF("SET1_subclass_umap_220422.pdf", plt.subclass.umap, fig.width=12, fig.height=12)
+# savePDF("SET1_class_umap_220422.pdf", plt.class.umap, fig.width=6, fig.height=5)
+```
+
+
+```{r cluster tree}
+
+ggdend.v2 <- function(df) {
+  ggplot() +
+    geom_segment(data = df, aes(x=x, y=y, xend=xend, yend=yend)) +
+    ggdendro::theme_dendro()
+}
+
+so.query@meta.data$mix_label3 <- factor(so.query@meta.data$mix_label2)
+ Idents(so.query) <- so.query@meta.data$mix_label3
+DefaultAssay(so.query) <- "integrated"
+so.query <- UpdateSeuratObject(so.query)
+so.query <- BuildClusterTree(object = so.query, assay = "integrated", slot = "scale.data") 
+DefaultAssay(so.query) <- "SCT"
+
+```
+
+```{r generate dot plot}
+
+df.class.dot.between <- df.class.dot.list$dat
+df.class.dot.between$id <- factor(df.class.dot.between$id, levels = levels(so.query@active.ident))
+query.hclust <- as.hclust(so.query@tools[["BuildClusterTree"]])
+
+d.query.clust <- ggdendro::dendro_data(query.hclust)
+
+# ggplot dendograms
+p.query.clust <- ggdend.v2(d.query.clust$segments) +
+  theme(axis.title.x=element_blank(),
+        axis.text=element_blank(),
+        axis.line=element_blank(),
+        axis.ticks=element_blank(),
+        legend.position = "none")
+
+
+# column factor annotations ###########################################################
+which.col.factor <- c("cluster.id")
+df.col.ann <- df.cluster.id
+df.col.ann$seurat_clusters <- factor(df.col.ann$seurat_clusters, levels = levels(df.class.dot.between$id))
+
+plt.col.ann <- list()
+plt.col.leg <- list()
+
+col.pal <- col.list$class2col$pal
+names(col.pal) <- col.list$class2col$cluster.id
+
+plt.col.ann[[which.col.factor]] <- df.col.ann %>%
+  ggplot(aes(x = seurat_clusters, y = 1, fill = get(which.col.factor))) + 
+  geom_bar(stat = "identity", position = "dodge")  + theme_minimal() + 
+  labs(fill = "Class") + 
+  scale_fill_manual(values = col.pal) + 
+  theme(axis.text.x.bottom = element_blank(), 
+        axis.ticks = element_blank(),
+        panel.spacing.x = unit(1, "mm"),
+        axis.title.x = element_blank(),
+        strip.text.x = element_blank()) +  theme(
+          panel.border = element_blank(),
+          axis.text = element_blank(),
+          axis.title.y = element_text(angle = 0, vjust = 0.5, size = 5),
+          panel.grid = element_blank(),
+          axis.ticks = element_blank()
+        ) + xlab("") + ylab("Class")  +
+  theme(legend.text = element_text(size=5),
+        legend.title = element_text(size=7),
+        legend.key.size = unit(0.4, "cm"))
+
+plt.col.leg[[which.col.factor]] <- cowplot::get_legend(plt.col.ann[[which.col.factor]])
+plt.col.ann[[which.col.factor]] <- plt.col.ann[[which.col.factor]] + theme(legend.position = "none") 
+
+df.col.ann <- df.cluster.id
+df.col.ann$seurat_clusters <- factor(df.col.ann$seurat_clusters, levels = levels(df.class.dot.between$id))
+
+
+# dot plot #####################################################################
+scale.limit <- max(abs(df.class.dot.between$avg.exp.scaled))
+plt.cluster.between.dot <- df.class.dot.between %>%
+  ggplot(aes(x = id, y = features.plot, color = avg.exp.scaled, size = pct.exp)) + 
+  geom_point() + 
+  scale_color_distiller(palette = "RdBu", limits = c(-scale.limit, scale.limit)) + 
+  theme_miko(legend = T, grid = T, x.axis.rotation = 45, center.title = T)+
+  scale_size_continuous(range = c(0, 2)) + 
+  theme(
+    axis.text.y = element_text(size = 5),
+    axis.text.x = element_text(size = 6),
+  ) + 
+  theme(axis.title.y=element_blank()) + 
+  xlab("Cluster") + 
+  labs(color = "Expr", size = "Pct") + 
+  scale_color_miko()
+
+leg.all2 <- list()
+leg.reg.h <- c()
+for (i in 1:length(plt.col.ann)){
+  if (i != length(plt.col.ann)){
+  leg.all2[[paste0(i, "-1")]] <- plt.col.ann[[i]]
+  leg.all2[[paste0(i, "-2")]] <- list() 
+  leg.reg.h <- c(leg.reg.h, 1, -0.4)
+  } else {
+   leg.all2[[paste0(i, "-1")]] <- plt.col.ann[[i]]   
+   leg.reg.h <- c(leg.reg.h, 1)
+  }
+
+}
+
+leg.all3 <- list()
+leg.reg.v <- c()
+
+leg.all <- c(plt.col.leg)
+
+plt.col.leg.all <- cowplot::plot_grid(plotlist = leg.all, ncol = 1)
+plt.col.ann.all <- cowplot::plot_grid(plotlist = leg.all2, rel_heights = leg.reg.h, ncol = 1, align = "v", axis = "l")
+
+plt.ann.top <- cowplot::plot_grid(cowplot::plot_grid(NULL, p.query.clust, ncol = 2, rel_widths = c(0.5,4)), 
+                   plt.col.ann.all, ncol = 1, align = "hv",  axis = "tblr")
+
+plt.dot1 <- cowplot::plot_grid(plt.ann.top, 
+                                    cowplot::plot_grid(NULL, plt.cluster.between.dot, 
+                                                       ncol = 2, rel_widths = c(0.1,4)), ncol = 1, align = "v", 
+                                    rel_heights = c(3,13), axis = "lr")
+plt.dot1
+
+plt.row.ann.all <- NULL
+plt.dot2 <- cowplot::plot_grid(NULL, plt.row.ann.all, ncol = 1, align = "h", rel_heights = c(3,13), axis  = "lb")
+
+plt.dot.no.leg <- cowplot::plot_grid(plt.dot1, NULL,plt.dot2, rel_widths =c(10, -0.75,2),  #c(10, -0.75,1.5)
+                                          nrow = 1, align = "v", axis  = "tb")
+
+plt.dot.no.leg <- cowplot::plot_grid(plt.dot1)
+
+plt.div7.dot <- cowplot::plot_grid(plt.dot.no.leg, plt.col.leg.all, ncol = 2, rel_widths = c(2,0.5))
+
+plt.dot.no.leg
+print(plt.div7.dot)
+
+
+```
+
+```{r fig.width=12, fig.height=24}
+
+print(plt.div7.dot)
+# savePDF("Reboot1_SET1_subclass_dotplot_130523.pdf", plt.div7.dot, fig.width=12, fig.height=24)
+# savePDF("Reboot1_SET1_subclass_dotplot_longlong_130523.pdf", plt.div7.dot, fig.width=15, fig.height=40)
+
+```
+
+```{r}
+
+plt.gad1 <- exprUMAP(so.query, "Gad1") + labs(subtitle  = "GABAergic") + texttheme
+plt.gad2 <- exprUMAP(so.query, "Gad2")   + labs(subtitle  = "GABAergic") + texttheme
+plt.Slc32a1 <- exprUMAP(so.query, "Slc32a1")   + labs(subtitle  = "GABAergic") + texttheme
+
+plt.Slc17a7 <- exprUMAP(so.query, "Slc17a7") + labs(subtitle  = "Glutamatergic") + texttheme
+plt.Slc17a6 <- exprUMAP(so.query, "Slc17a6") + labs(subtitle  = "Glutamatergic") + texttheme
+
+plt.Postn <- exprUMAP(so.query, "Postn") + labs(subtitle  = "CT2A Subpopulation") + texttheme
+plt.Rfx6 <- exprUMAP(so.query, "Rfx6") + labs(subtitle  = "GL261 Tumor") + texttheme
+plt.Scn4b <- exprUMAP(so.query, "Scn4b") + labs(subtitle  = "Neural") + texttheme
+plt.Cx3cr1 <- exprUMAP(so.query, "Cx3cr1") + labs(subtitle  = "Myeloid") + texttheme
+plt.Hapln2 <- exprUMAP(so.query, "Hapln2") + labs(subtitle  = "Oligodendrocyte") + texttheme
+plt.Etnppl <- exprUMAP(so.query, "Etnppl") + labs(subtitle  = "Astrocyte") + texttheme
+plt.Sst <- exprUMAP(so.query, "Sst") + labs(subtitle  = "Neural") + texttheme
+plt.Pdgfra <- exprUMAP(so.query, "Pdgfra") + labs(subtitle  = "OPC") + texttheme
+
+plt.Vip <- exprUMAP(so.query, "Vip") + labs(subtitle  = "Neural") + texttheme
+plt.Cdhr1 <- exprUMAP(so.query, "Cdhr1") + labs(subtitle  = "Neural") + texttheme
+plt.Il18r1 <- exprUMAP(so.query, "Il18r1") + labs(subtitle  = "Lymphoid") + texttheme
+plt.Th <- exprUMAP(so.query, "Th") + labs(subtitle  = "Dopaminergic") + texttheme
+plt.Fat2 <- exprUMAP(so.query, "Fat2") + labs(subtitle  = "Cerebellar Granule Neurons") + texttheme
+plt.Six3 <- exprUMAP(so.query, "Six3") + labs(subtitle  = "Neural") + texttheme
+
+plt.Tmem72 <- exprUMAP(so.query, "Tmem72") + labs(subtitle  = "Choroid Plexus") + texttheme
+plt.Frzb <- exprUMAP(so.query, "Frzb") + labs(subtitle  = "Fibroblast-like") + texttheme
+
+
+# exprUMAP(so.query, "Foxp2") + labs(subtitle  = "Fibroblast-like") + texttheme
+
+```
+
+```{r fig.width=4, fig.height=4}
+
+which.gene <- c("Hmga2", "Bnc2", "Moxd1", "P2ry12", "Dock2", "Skap1", "Pdgfra", "Mbp", "Etnppl", "Rbfox1", "Slc17a7", "Gad2")
+
+
+plt.expr <- list()
+
+for(i  in 1:length(which.gene)){
+
+plt.expr[[which.gene[i]]] <- exprUMAP(object = so.query, feature = which.gene[i], do.neb = T,
+                                      scale.color = "black", 
+                                      slot = "data")  +
+   texttheme
+  
+
+plt.expr[[which.gene[i]]]
+    # savePDF(paste0(gene, "_tumor_marker_230222.pdf"), exprUMAP(object, gene, scale.color =  color, size = 0.01, raster = F), fig.width = 5, fig.height = 5)
+
+
+savePDF(paste0("Reboot1_", which.gene[i], "_umapExpr_130523.pdf"), plt.expr[[which.gene[i]]], fig.width=4, fig.height=4)
+  
+}
+
+
+exprUMAP(object = so.query, feature ="Col18a1", scale.color = "black", raster.dpi = c(512*2, 512*2),
+                                      slot = "data")  +
+   texttheme
+exprUMAP(object = so.query, feature ="Skap1", scale.color = "black", raster.dpi = c(512*2, 512*2),
+                                      slot = "data")  +
+   texttheme
+
+# savePDF(paste0("Reboot1_", which.gene[i], "_umapExpr_130523.pdf"), plt.expr$Xist, fig.width=4, fig.height=4)
+
+ exprUMAP(object = so.query, feature = "Xist", do.neb = T,
+                                      scale.color = "black", 
+                                      slot = "data") + theme(legend.position = "right")
+```
+
+```{r recovery stats,  fig.width=12, fig.height=4}
+
+group.names <- c("02_CT2A_R3" = "CT2A_R1", "06_GBM_PBSctrl" = "Sham_R1", "1_09_GL261-WT" = "GL261_R1", "2_26_CT2A-WT" = "CT2A_R2",    "2_27_PBSctrl" = "Sham_R2",  "CT2A" = "CT2A_R3" ,  "CT2A_R2" = "CT2A_R4", "GL261" = "GL261_R2", "GL261_R3" = "GL261_R3")
+
+so.query@meta.data$replicate <- group.names[so.query@meta.data $subset_group]
+so.query@meta.data$replicate <- factor(so.query@meta.data$replicate, levels = c("Sham_R1","Sham_R2", "CT2A_R1",   "CT2A_R2",   "CT2A_R3" , "CT2A_R4", "GL261_R1","GL261_R2", "GL261_R3"))
+
+df.recovery.stat <- so.query@meta.data %>%
+  dplyr::group_by(replicate) %>%
+  dplyr::summarize(
+    umi = median(nCount_RNA),
+    ngene = median(nFeature_RNA),
+    ncell = length(nFeature_RNA),
+    pmito = median(percent.mt)
+  )
+
+df.recovery.stat$replicate <- factor(df.recovery.stat$replicate, levels = c("Sham_R1","Sham_R2", "CT2A_R1",   "CT2A_R2",   "CT2A_R3" , "CT2A_R4", "GL261_R1","GL261_R2", "GL261_R3"))
+
+so.query@meta.data$nCount_RNA.log <- log10(so.query@meta.data$nCount_RNA)
+so.query@meta.data$nFeature_RNA.log <- log10(so.query@meta.data$nFeature_RNA)
+so.query@meta.data$percent.mt.log <- log10(so.query@meta.data$percent.mt + 1)
+
+p1 <- exprUMAP(object = so.query, feature = "nCount_RNA.log",raster = T) + viridis::scale_color_viridis() + theme(legend.position = "bottom")
+p2 <- exprUMAP(object = so.query, feature = "nFeature_RNA.log",raster = T) + viridis::scale_color_viridis() + theme(legend.position = "bottom")
+p3 <- exprUMAP(object = so.query, feature = "percent.mt.log",raster = T) + viridis::scale_color_viridis() + theme(legend.position = "bottom")
+
+
+p1 <- exprUMAP(object = so.query, feature = "nCount_RNA.log",raster = T, raster.dpi = c(512*2, 512*2)) + viridis::scale_color_viridis() + theme(legend.position = "bottom")
+p2 <- exprUMAP(object = so.query, feature = "nFeature_RNA.log",raster = T, raster.dpi = c(512*2, 512*2)) + viridis::scale_color_viridis() + theme(legend.position = "bottom")
+p3 <- exprUMAP(object = so.query, feature = "percent.mt.log",raster = T, raster.dpi = c(512*2, 512*2)) + viridis::scale_color_viridis() + theme(legend.position = "bottom")
+
+plt.umap.recovery <- cowplot::plot_grid(p1, p2, p3, nrow = 1)
+# savePDF("Reboot1_recovery_stat_umap_highres_130523.pdf",plt.umap.recovery, fig.width=12, fig.height=4 )
+```
+
+```{r recorvery statistics, fig.width=16, fig.height=4}
+
+p1 <- df.recovery.stat %>%
+  ggplot(aes(x = replicate, y = ncell)) + 
+  geom_bar(stat = "identity")  + 
+  theme_miko(x.axis.rotation = 45)
+
+p2 <- so.query@meta.data  %>%
+  ggplot(aes(x = replicate, y = nCount_RNA)) + 
+  geom_boxplot(fill = "grey") + 
+  scale_y_log10() + 
+  theme_miko(x.axis.rotation = 45)
+
+p3 <- so.query@meta.data  %>%
+  ggplot(aes(x = replicate, y = nFeature_RNA)) + 
+  geom_boxplot(fill = "grey") + 
+  scale_y_log10() +
+  theme_miko(x.axis.rotation = 45)
+
+p4 <- so.query@meta.data  %>%
+  ggplot(aes(x = replicate, y = percent.mt)) + 
+  geom_boxplot(fill = "grey") + 
+  scale_y_log10() + 
+  theme_miko(x.axis.rotation = 45)
+
+plt.stat <- cowplot::plot_grid(p1, p2, p3,p4, nrow = 1)
+plt.stat
+
+# savePDF("Reboot1_recovery_stat_summary_130523.pdf",plt.stat, fig.width=16, fig.height=4 )
+```
+
+```{r umap stratified by replicate, fig.width=36, fig.height=4}
+
+so.query@meta.data$replicate <- group.names[so.query@meta.data $subset_group]
+so.query@meta.data$replicate <- factor(so.query@meta.data$replicate, levels = c("Sham_R1","Sham_R2", "CT2A_R1",   "CT2A_R2",   "CT2A_R3" , "CT2A_R4", "GL261_R1","GL261_R2", "GL261_R3"))
+
+df.umap <- getUMAP(so.query)[["df.umap"]]
+
+plt.panel <- df.umap %>%
+  ggplot(aes(x = x, y = y, color = class)) + 
+  scattermore::geom_scattermore() + 
+  facet_wrap(~replicate, nrow = 1) + 
+  theme_miko() + 
+  theme_void()
+
+# savePDF("Reboot1_recovery_umap_byReplicate_130523.pdf",plt.panel, fig.width=36, fig.height=4 )
+```
+
+
+```{r clustered umap without labels}
+
+label.size <- 2
+raster.dpi = c(512*2, 512*2)
+pt.size = 0.5
+do.raster <- T
+
+p1 <- cluster.UMAP(so.query, "mix_label2", label.size = label.size, repel = T, raster = do.raster, raster.dpi = raster.dpi, pt.size = pt.size) + 
+  theme_miko() + theme_void() + scale_color_manual(values= col.values) + theme(legend.position = "none") 
+
+p1
+
+# savePDF("Reboot1_annotated_UMAP_140523.pdf", p1, fig.width = 5, fig.height = 5)
+
+```
+
+```{r save annotated data}
+
+so.query@meta.data$subclass <- so.query@meta.data$mix_label2
+
+# saveRDS(file = "R726_M02_HH_SET1_allGBM_reboot_rPCA_integration_ANNOTATED_220422.rds", object = so.query)
+  # input.file ="R726_M02_HH_SET1_allGBM_reboot_rPCA_integration_ANNOTATED_220422.rds"
+```
+

@@ -1,0 +1,1324 @@
+---
+title: "PR"
+author: "Nicholas Mikolajewicz"
+date: '2022-07-07'
+output: html_document
+---
+
+
+```{r load libraries, include=FALSE}
+
+# clear global enviroment                          
+rm(list = setdiff(ls(), c("data.path", "user")))
+invisible({gc()})
+
+# initiate timer
+start.time <- proc.time()
+
+# load packages
+packages2load <- c("scMiko", "Seurat", "plyr",  "dplyr", "tidyr", "reshape2", 
+                   "DT", "flexdashboard", "ggpmisc", "future", "foreach", "doParallel",
+                   "AnnotationDbi", "org.Mm.eg.db", "org.Hs.eg.db", "fgsea", "ggplot2", "reactome.db",
+                   "schex", "RColorBrewer", "cowplot")
+
+# load packages
+invisible(lapply(packages2load, library, character.only = TRUE))
+
+```
+
+```{r load data}
+
+path.pacini.db <- "C:/Users/n mikolajewicz/Dropbox/PDF Projects - JM/Data/scRNA-seq/01_sci-RNA-seq3_Hong_Kevin_Jason/NM_HH/PR_GBM/Papers/Pacini et al 2021/Project_score_combined_Sanger_v1_Broad_20Q2_20210311/"
+file.pacini.db <- "Project_score_combined_Sanger_v1_Broad_20Q2_fitness_scores_scaled_bayesian_factors_20210311.tsv"
+
+df.crispr.db_other <- read.delim2("C:/Users/n mikolajewicz/Dropbox/PDF Projects - JM/Data/scRNA-seq/01_sci-RNA-seq3_Hong_Kevin_Jason/NM_HH/PR_GBM/Papers/Pacini et al 2021/PROJEC~1/PROJEC~1.TSV") 
+
+# BF matrix
+df.crispr.db_bf <- read.delim2("C:/Users/n mikolajewicz/Dropbox/PDF Projects - JM/Data/scRNA-seq/01_sci-RNA-seq3_Hong_Kevin_Jason/NM_HH/PR_GBM/Papers/Pacini et al 2021/PROJEC~1/PROJEC~2.TSV") 
+
+# LFC matrix - THIS IS ACTUALLY SCALED BAYESIAN FACTOR
+df.crispr.db_lfc <- read.delim2("C:/Users/n mikolajewicz/Dropbox/PDF Projects - JM/Data/scRNA-seq/01_sci-RNA-seq3_Hong_Kevin_Jason/NM_HH/PR_GBM/Papers/Pacini et al 2021/PROJEC~1/PROJEC~3.TSV") 
+
+df.crispr.db_fs_bf <- read.delim2("C:/Users/n mikolajewicz/Dropbox/PDF Projects - JM/Data/scRNA-seq/01_sci-RNA-seq3_Hong_Kevin_Jason/NM_HH/PR_GBM/Papers/Pacini et al 2021/PROJEC~1/PROJEC~4.TSV") 
+
+```
+
+
+```{r PR CRISPR DB}
+
+df.crispr.db <- df.crispr.db_lfc
+
+# GBM lines ####################################################################
+gbm.lines <- c("8-MG-BA", "CAS-1", "AM-38", "DK-MG", "Onda-7", "NP-3", "D-502MG", "LN-464", "GB-1", "NP-2", "SNU-1105", "LN-229", "no-10", "SF126", "NP-8", "T98G", "KNS-60", "NP-5", "GAMG", "YH-13", "no-11", "LN-382", "DBTRG-05MG", "KNS-42", "U-343-MGa", "M059K", "42-MG-BA", "LN-18", "SNU-201", "SF539", "GI-1", "KALS-1", "LN-443", "SF295", "YKG-1", "ANGM-CSS", "Onda-9", "U-87-MG", "SNB75", "D-542MG", "SF172", "D-423MG", "A172")
+gbm.lines2 <- paste0("", gsub("-", ".", gbm.lines))
+gbm.lines3 <- paste(gbm.lines2, collapse = "|")
+df.crispr.db2 <- cbind(df.crispr.db[, 1], df.crispr.db[ ,colnames(df.crispr.db) %in% gbm.lines2])
+df.crispr.db3 <- df.crispr.db2[5:nrow(df.crispr.db2), ]
+df.crispr.db3 <- col2rowname(df.crispr.db3, "df.crispr.db[, 1]") 
+gene.names <- rownames(df.crispr.db3)
+df.crispr.db3<- bind_cols(pbapply::pblapply(df.crispr.db3,as.numeric))
+rownames(df.crispr.db3) <- gene.names
+
+# LGG ##########################################################################
+lgg.lines <- c("U-118-MG", "LN-235", "CCF-STTG1", "Hs-683", "SW1088", 
+               "MOG-G-UVW", "TM-31", "SNU-738", "Becker", "ONDA8", "KINGS-1", "LN-319", "SF268", "SK-MG-1", 
+               "LN-Z308", "LN-340", "U251", "LNZTA3WT4", "NMC-G1")
+lgg.lines2 <- paste0("", gsub("-", ".", lgg.lines))
+lgg.lines3 <- paste(lgg.lines2, collapse = "|")
+# df.crispr.glioma.db2 <- cbind(df.crispr.db[, 1], df.crispr.db[ ,grepl(lgg.lines3, colnames(df.crispr.db))])
+df.crispr.glioma.db2 <- cbind(df.crispr.db[, 1], df.crispr.db[ ,colnames(df.crispr.db) %in% lgg.lines2])
+df.crispr.glioma.db3 <- df.crispr.glioma.db2[5:nrow(df.crispr.glioma.db2), ]
+df.crispr.glioma.db3 <- col2rowname(df.crispr.glioma.db3, "df.crispr.db[, 1]") 
+gene.names <- rownames(df.crispr.glioma.db3)
+df.crispr.glioma.db3<- bind_cols(pbapply::pblapply(df.crispr.glioma.db3,as.numeric))
+rownames(df.crispr.glioma.db3) <- gene.names
+
+# non-GBM lines ###############################
+df.crispr.other.db2 <- cbind(df.crispr.db[, 1], df.crispr.db[ ,!((colnames(df.crispr.db) %in% gbm.lines2) | (colnames(df.crispr.db) %in%  lgg.lines2))])
+df.crispr.other.db3 <- df.crispr.other.db2[5:nrow(df.crispr.other.db2), ]
+df.crispr.other.db3 <- col2rowname(df.crispr.other.db3, "df.crispr.db[, 1]") 
+df.crispr.other.db3 <- col2rowname(df.crispr.other.db3, "model_name") 
+gene.names <- rownames(df.crispr.other.db3)
+df.crispr.other.db3<- bind_cols(pbapply::pblapply(df.crispr.other.db3,as.numeric))
+rownames(df.crispr.other.db3) <- gene.names
+
+df.gbm.depmap <- data.frame(
+  Gene = rownames(df.crispr.db3),
+  logFC.DEP =  Matrix::rowMeans(df.crispr.db3, na.rm = T),
+  logFC.sd.DEP = sqrt(Matrix::rowSums((df.crispr.db3 - Matrix::rowMeans(df.crispr.db3, na.rm = T))^2) / ncol(df.crispr.db3)),
+  nonsig.DEP = Matrix::rowSums( df.crispr.db3 <= 0 , na.rm = T) ,
+  sig.DEP = Matrix::rowSums( df.crispr.db3 > 0, na.rm = T) ,
+  set = "GBM"
+)
+
+df.glioma.depmap <- data.frame(
+  Gene = rownames(df.crispr.glioma.db3),
+  logFC.DEP =  Matrix::rowMeans(df.crispr.glioma.db3, na.rm = T),
+  logFC.sd.DEP = sqrt(Matrix::rowSums((df.crispr.glioma.db3 - Matrix::rowMeans(df.crispr.glioma.db3, na.rm = T))^2) / ncol(df.crispr.glioma.db3)),
+  nonsig.DEP = Matrix::rowSums( df.crispr.glioma.db3 <= 0 , na.rm = T) ,
+  sig.DEP = Matrix::rowSums( df.crispr.glioma.db3 > 0, na.rm = T) ,
+  set = "Glioma"
+)
+
+df.other.depmap <- data.frame(
+  Gene = rownames(df.crispr.other.db3),
+  logFC.DEP =  Matrix::rowMeans(df.crispr.other.db3, na.rm = T),
+  logFC.sd.DEP = sqrt(Matrix::rowSums((df.crispr.other.db3 - Matrix::rowMeans(df.crispr.other.db3, na.rm = T))^2) / ncol(df.crispr.other.db3)),
+  nonsig.DEP = Matrix::rowSums( df.crispr.other.db3 <= 0 , na.rm = T) ,
+  sig.DEP = Matrix::rowSums( df.crispr.other.db3 > 0, na.rm = T) ,
+  set = "Other"
+)
+
+df.depmap <- bind_rows(df.gbm.depmap, bind_rows(df.glioma.depmap, df.other.depmap))
+df.depmap$n <- df.depmap$nonsig.DEP + df.depmap$sig.DEP
+df.depmap$z <- df.depmap$logFC.DEP / df.depmap$logFC.sd.DEP
+
+df.depmap.wide <- pivot_wider(df.depmap, names_from = "set", values_from = c("logFC.DEP", "logFC.sd.DEP", "nonsig.DEP", "sig.DEP", "n", "z"))
+
+# write.csv(df.depmap, "GBM_dependencies_PROJECTSCORE_200722.csv")
+
+```
+
+
+```{r CT2A dropout screen}
+
+dat.ct2a <- read.delim("C:/Users/n mikolajewicz/Dropbox/PDF Projects - JM/Data/scRNA-seq/01_sci-RNA-seq3_Hong_Kevin_Jason/NM_HH/GBM/Reboot/Data/01_CRISPR_screens/Vassil_Screens/MUS019 CT2A-OVA Cas9 Drop-out & T-cell killing - 20201110 - readcounts-1.txt") 
+
+meta.ct2a <- readxl::read_xlsx("C:/Users/n mikolajewicz/Dropbox/PDF Projects - JM/Data/scRNA-seq/01_sci-RNA-seq3_Hong_Kevin_Jason/NM_HH/GBM/Reboot/Data/01_CRISPR_screens/Vassil_Screens/MUS019_sample_overview-1.xlsx") 
+
+bagel.ct2a <- readxl::read_xlsx("C:/Users/n mikolajewicz/Dropbox/PDF Projects - JM/Data/scRNA-seq/01_sci-RNA-seq3_Hong_Kevin_Jason/NM_HH/GBM/Reboot/Data/01_CRISPR_screens/Vassil_Screens/MUS019 CT2A-OVA_bagel.xlsx") 
+
+bagel.gl261 <- readxl::read_xlsx("C:/Users/n mikolajewicz/Dropbox/PDF Projects - JM/Data/scRNA-seq/01_sci-RNA-seq3_Hong_Kevin_Jason/NM_HH/GBM/Reboot/Data/01_CRISPR_screens/MUS033 GL261-Cas9 drop out_Initial analysis T0, T15_2023-03-20_bagel_combined.xlsx") 
+
+bagel.gl261_v2 <- bagel.gl261
+colnames(bagel.gl261_v2) <- paste0("G_", colnames(bagel.gl261_v2))
+bagel.ct2a_v2 <- bagel.ct2a
+colnames(bagel.ct2a_v2) <- paste0("C_", colnames(bagel.ct2a_v2))
+
+bagel.gl261_v2$gene <- bagel.gl261_v2$G_Gene
+bagel.ct2a_v2$gene <- bagel.ct2a_v2$C_GENE
+
+bagel.murine.merge <- merge(bagel.ct2a_v2, bagel.gl261_v2, by = "gene")
+
+t0.sample <- "MUS_445"
+t10.sample <- c("MUS_452", "MUS_453", "MUS_454")
+t19.sample <- c("MUS_455", "MUS_456", "MUS_457")
+
+dat.ct2a_2 <- dat.ct2a[ ,c(t0.sample, t10.sample, t19.sample)]
+rownames(dat.ct2a_2) <- make.unique(dat.ct2a$GENE)
+
+# Convert NAs to 0's
+dat.ct2a_2[ is.na( dat.ct2a_2 ) ] <- 0
+
+# Filter out low T0s
+dat.ct2a_2 <- dat.ct2a_2[ unlist(dat.ct2a_2[ ,t0.sample]) >= 30, ]
+
+dat.ct2a_2 <- as.data.frame(apply(dat.ct2a_2, 2, function(x){
+  (x / sum(x, na.rm = T)) * 1e7
+}))
+
+dat.ct2a_3 <- data.frame(
+  gene = stringr::str_remove(rownames(dat.ct2a_2), pattern = "\\.[0-9]*") ,
+  t0 = dat.ct2a_2[ ,t0.sample],
+  t10 = Matrix::rowMeans(dat.ct2a_2[ ,t10.sample]) ,
+  t19 = Matrix::rowMeans(dat.ct2a_2[ ,t19.sample])
+)
+
+pseudocount <- 0.1
+dat.ct2a_3$t10_lfc <- log2((dat.ct2a_3$t10 + pseudocount)/(dat.ct2a_3$t0 + pseudocount))
+dat.ct2a_3$t19_lfc <- log2((dat.ct2a_3$t19 + pseudocount)/(dat.ct2a_3$t0 + pseudocount))
+dat.ct2a_3$t10_t19_lfc <- log2((dat.ct2a_3$t19 + pseudocount)/(dat.ct2a_3$t10 + pseudocount))
+dat.ct2a_3$Gene <- toupper(dat.ct2a_3$gene)
+
+dat.ct2a_3.sum <- dat.ct2a_3 %>%
+  dplyr::group_by(Gene) %>%
+  dplyr::summarise(
+    t10_lfc = mean(t10_lfc, na.rm = T),
+    t19_lfc = mean(t19_lfc, na.rm = T),
+    t10_t19_lfc = mean(t10_t19_lfc, na.rm = T)
+  ) %>%
+  filter( dplyr::n() > 2 )
+
+p1 <- dat.ct2a_3.sum %>%
+  ggplot(aes(x = t10_lfc-median(t10_lfc))) + 
+  geom_histogram() + 
+  labs(title = "T10", x = "LFC (T10/T0)")
+
+p2 <- dat.ct2a_3.sum %>%
+  ggplot(aes(x = t19_lfc-median(t10_lfc))) + 
+  geom_histogram() + 
+  labs(title = "T19", x = "LFC (T19/T0)")
+
+cowplot::plot_grid(p1, p2)
+
+df.depmap.dt <- df.depmap.wide
+df.ct2a.merge <- merge(df.depmap.dt, dat.ct2a_3.sum, by = "Gene")
+
+df.ct2a.merge %>%
+  ggplot(aes(x = t10_lfc, y = logFC.DEP_GBM)) +
+  geom_point()
+
+df.ct2a.merge %>%
+  ggplot(aes(x = t10_lfc, y = logFC.DEP_GBM - logFC.DEP_Other)) +
+  geom_point()
+
+df.ct2a.merge2 <- df.ct2a.merge %>% dplyr::filter(t10_lfc < -4, logFC.DEP_GBM < 0.1)
+
+hist(bagel.ct2a$BF_T19)
+
+p1 <- bagel.ct2a %>%
+  ggplot(aes(x = snip(BF_T10))) + 
+  geom_histogram() + 
+  labs(title = "T10", x = "LFC (T10/T0)")
+
+p2 <- bagel.ct2a %>%
+  ggplot(aes(x = snip(BF_T19))) + 
+  geom_histogram() + 
+  labs(title = "T19", x = "LFC (T19/T0)")
+
+cowplot::plot_grid(p1, p2)
+
+```
+
+
+```{r}
+
+df.depmap.dt$dif_GBM_other2 <-(df.depmap.dt$logFC.DEP_GBM - df.depmap.dt$logFC.DEP_Other) 
+
+
+df.depmap.dt %>%
+  ggplot(aes(x = dif_GBM_other2, y = logFC.DEP_GBM)) + 
+  geom_point()
+
+df.depmap.dt$delta_GBM_other2 <-(df.depmap.dt$logFC.DEP_GBM - df.depmap.dt$logFC.DEP_Other) / sqrt((df.depmap.dt$logFC.sd.DEP_GBM^2) + (df.depmap.dt$logFC.sd.DEP_Other^2))
+
+
+```
+
+
+```{r compare murine vs. human essentiality}
+
+murine.essential <- list(
+  ct2a.t10 = bagel.ct2a$GENE[bagel.ct2a$BF_T19 > 5],
+  ct2a.t19 = bagel.ct2a$GENE[bagel.ct2a$BF_T19 > 5],
+  gl261.t15 = bagel.gl261$Gene[bagel.gl261$BF > 5]
+)
+df.depmap.dt2 <- df.depmap.dt
+
+df.depmap.dt2$ct2a.essential.t10 <- df.depmap.dt2$Gene %in% toupper(murine.essential$ct2a.t19)
+df.depmap.dt2$ct2a.essential.t19 <- df.depmap.dt2$Gene %in% toupper(murine.essential$ct2a.t19)
+df.depmap.dt2$gl261.essential.t15 <- df.depmap.dt2$Gene %in% toupper(murine.essential$gl261.t15)
+
+sum(df.depmap.dt2$logFC.DEP_GBM > 0.5)
+hs.gbm.ess <- df.depmap.dt2$Gene[df.depmap.dt2$logFC.DEP_GBM > 0.5]
+
+
+p1.ct2a.spec <- df.depmap.dt2 %>%
+  ggplot(aes(x = ct2a.essential.t10, y = (logFC.DEP_GBM), fill = ct2a.essential.t10 )) + 
+  geom_boxplot(outlier.color = NA) +
+  geom_hline(yintercept = 0, linetype = "dashed") + 
+  scale_fill_manual(values = c("TRUE" = "tomato", "FALSE" = "grey")) + 
+  theme_miko() + 
+  labs(y = "GBM-Specific Dependency (GBM - NonCNS Essentiality)", 
+       x = "CT2A Essential Gene", 
+       title = "GBM-Specific Dependency (GBM - NonCNS Essentiality)")
+
+
+p2.gl261.spec <- df.depmap.dt2 %>%
+  ggplot(aes(x = gl261.essential.t15, y = (logFC.DEP_GBM), fill = gl261.essential.t15 )) + 
+  geom_boxplot(outlier.color = NA) +
+  geom_hline(yintercept = 0, linetype = "dashed") + 
+  scale_fill_manual(values = c("TRUE" = "tomato", "FALSE" = "grey")) + 
+  theme_miko() + 
+  labs(y = "GBM-Specific Dependency (GBM - NonCNS Essentiality)", 
+       x = "GL261 Essential Gene", 
+       title = "GBM-Specific Dependency (GBM - NonCNS Essentiality)")
+
+p1.ct2a.spec
+p2.gl261.spec
+
+# filtering function - turns outliers into NAs to be removed
+filter_lims <- function(x){
+  l <- boxplot.stats(x)$stats[1]
+  u <- boxplot.stats(x)$stats[5]
+
+  for (i in 1:length(x)){
+    x[i] <- ifelse(x[i]>l & x[i]<u, x[i], NA)
+  }
+  return(x)
+}
+
+p1.ct2a <- df.depmap.dt2 %>%
+  ggplot(aes(x = ct2a.essential.t10, y = (logFC.DEP_GBM))) + 
+  geom_boxplot(outlier.color = NA, fill = "grey") + 
+  labs(title = "GBM", subtitle = "vs. CT2A") + 
+  theme_miko()
+
+p2.ct2a <- df.depmap.dt2 %>%
+  ggplot(aes(x = ct2a.essential.t10, y = logFC.DEP_Glioma))+ 
+  geom_boxplot(outlier.color = NA, fill = "grey") + 
+  labs(title = "Glioma", subtitle = "vs. CT2A") + 
+  theme_miko()
+
+p3.ct2a <- df.depmap.dt2 %>%
+  ggplot(aes(x = ct2a.essential.t10, y = logFC.DEP_Other)) + 
+  geom_boxplot(outlier.color = NA, fill = "grey") + 
+  labs(title = "Non-CNS Tumors", subtitle = "vs. CT2A") + 
+  theme_miko()
+
+
+p1.gl261 <- df.depmap.dt2 %>%
+  ggplot(aes(x = gl261.essential.t15, y = (logFC.DEP_GBM))) + 
+  geom_boxplot(outlier.color = NA, fill = "grey") + 
+  labs(title = "GBM", subtitle = "vs. GL261") + 
+  theme_miko()
+
+p2.gl261 <- df.depmap.dt2 %>%
+  ggplot(aes(x = gl261.essential.t15, y = logFC.DEP_Glioma))+ 
+  geom_boxplot(outlier.color = NA, fill = "grey") + 
+  labs(title = "Glioma", subtitle = "vs. GL261") + 
+  theme_miko()
+
+p3.gl261 <- df.depmap.dt2 %>%
+  ggplot(aes(x = gl261.essential.t15, y = logFC.DEP_Other)) + 
+  geom_boxplot(outlier.color = NA, fill = "grey") + 
+  labs(title = "Non-CNS Tumors", subtitle = "vs. GL261") + 
+  theme_miko()
+
+p_gbm_vs_other_ess <- wilcox.test(df.depmap.dt2$logFC.DEP_GBM[df.depmap.dt2$ct2a.essential.t10], 
+                              df.depmap.dt2$logFC.DEP_Other[df.depmap.dt2$ct2a.essential.t10])$p.value
+p_gbm_spec_ess <- wilcox.test(df.depmap.dt2$delta_GBM_other2[df.depmap.dt2$ct2a.essential.t10], 
+                              df.depmap.dt2$delta_GBM_other2[!df.depmap.dt2$ct2a.essential.t10])$p.value
+
+cowplot::plot_grid(p1.ct2a, p2.ct2a, p3.ct2a, 
+                   p1.gl261, p2.gl261, p3.gl261, nrow = 1)
+
+df.depmap.dt2 %>%
+  ggplot(aes(x = ct2a.essential.t19, y = logFC.DEP_GBM)) + 
+  geom_boxplot(outlier.color = NA) 
+
+df.depmap.dt2 %>%
+  ggplot(aes(x = gl261.essential.t15, y = logFC.DEP_GBM)) + 
+  geom_boxplot(outlier.color = NA) 
+
+# annotate essentiality profile ################################################
+gene.ess.list <- list(
+  ct2a.ess.gbm.spec = df.depmap.dt2$Gene[(df.depmap.dt2$logFC.DEP_GBM  > 0 ) & df.depmap.dt2$ct2a.essential.t10],
+  ct2a.noness.gbm.spec = df.depmap.dt2$Gene[(df.depmap.dt2$logFC.DEP_GBM  > 0) & !df.depmap.dt2$ct2a.essential.t10],
+  ct2a.ess.gbm.nonspec = df.depmap.dt2$Gene[(df.depmap.dt2$logFC.DEP_GBM  <= 0) & df.depmap.dt2$ct2a.essential.t10],
+  gl261.ess.gbm.spec = df.depmap.dt2$Gene[(df.depmap.dt2$logFC.DEP_GBM  > 0) & df.depmap.dt2$gl261.essential.t15],
+  gl261.noness.gbm.spec = df.depmap.dt2$Gene[(df.depmap.dt2$logFC.DEP_GBM  > 0) & !df.depmap.dt2$gl261.essential.t15],
+  gl261.ess.gbm.nonspec = df.depmap.dt2$Gene[(df.depmap.dt2$logFC.DEP_GBM  <= 0) & df.depmap.dt2$gl261.essential.t15]
+)
+
+```
+
+
+```{r annotate essentiality profile, fig.width=8, fig.height=4}
+
+hg.ess <- runHG(gene.list = gene.ess.list, gene.universe = df.depmap.dt2$Gene, species = "Hs", pathway.db = "GO", e2s = F, go.ontology = "BP")
+hg.ess.sum <- summarizeHG(hg.ess)
+
+df.hg <- hg.ess.sum$results
+df.hg <- df.hg %>% dplyr::filter(df.hg$padj < 0.1)
+
+
+ulist <- unique(df.hg$geneset)
+plt.hm <- list()
+for (i in 1:length(ulist)){
+  
+  if (ulist[i] == "ct2a.ess.gbm.nonspec") next
+  
+  df.hg.cur <- df.hg %>% dplyr::filter(geneset %in% ulist[i])
+  
+  jlist <- df.hg.cur$overlapGenes
+  names(jlist) <- df.hg.cur$pathway
+  jlist <- lapply(jlist, function(x){
+    unlist(strsplit(x, split = ", "))
+    })
+  
+  jmat <- jaccardSimilarityMatrix(jlist)
+  
+  plt.hm[[i]] <- miko_heatmap(jmat, show_rownames  = T, show_colnames = F) + labs(title =ulist[i], fontsize = 3 )
+
+}
+
+plt.hm
+
+```
+
+
+```{r compare gene sets}
+
+ct2a.color <- brewer.pal(n = 3, "BrBG")[3]
+gl261.color <- brewer.pal(n = 3, "BrBG")[1]
+
+ess.thresh <- 0
+gene.ess.list2 <- list(
+  hs.gbm.ess  = df.depmap.dt2$Gene[df.depmap.dt2$logFC.DEP_GBM > ess.thresh],
+ct2a.gbm.ess =  df.depmap.dt2$Gene[df.depmap.dt2$ct2a.essential.t19],
+gl261.gbm.ess =  df.depmap.dt2$Gene[df.depmap.dt2$gl261.essential.t15]
+)
+
+gene.ess.list.all <- list(
+  gbm  = df.depmap.dt2$Gene[df.depmap.dt2$logFC.DEP_GBM > ess.thresh],
+  non_gbm  = df.depmap.dt2$Gene[ df.depmap.dt2$logFC.DEP_Other > 0],
+ct2a =  df.depmap.dt2$Gene[df.depmap.dt2$ct2a.essential.t19],
+gl261 =  df.depmap.dt2$Gene[df.depmap.dt2$gl261.essential.t15]
+)
+plt.venn <- ggVennDiagram::ggVennDiagram(gene.ess.list.all) +  scale_fill_gradient(low = "#F4FAFE", high = "#4981BF")
+
+gene.spec.list <- list(
+  hs.gbm.ess  = df.depmap.dt2$Gene[df.depmap.dt2$logFC.DEP_GBM > ess.thresh],
+ct2a.gbm.ess =  df.depmap.dt2$Gene[df.depmap.dt2$ct2a.essential.t19],
+gl261.gbm.ess =  df.depmap.dt2$Gene[df.depmap.dt2$gl261.essential.t15]
+)
+
+gbm.spec <- df.depmap.dt2$Gene[df.depmap.dt2$logFC.DEP_GBM > ess.thresh & df.depmap.dt2$logFC.DEP_Other < ess.thresh]
+
+gene.spec.list <- lapply(gene.spec.list, function(x) x[(x %in% gbm.spec)])
+ggVennDiagram::ggVennDiagram(gene.spec.list)
+
+gene.spec.list
+
+ggVennDiagram::ggVennDiagram(gene.ess.list2)
+plt.comp <- ggVennDiagram::ggVennDiagram(gene.ess.list2[c("ct2a.gbm.ess", "gl261.gbm.ess")]) 
+
+library(eulerr)
+a.label = "CT2A" 
+b.label <- "GL261"
+a <- gene.ess.list2$ct2a.gbm.ess
+b <- gene.ess.list2$gl261.gbm.ess
+e.input <- c("A" = length(a) - length(intersect(a, b)), "B" = length(b) - length(intersect(a, b)), "A&B" = length(intersect(a, b)))
+names(e.input) <- c(a.label, b.label, paste0(a.label, "&", b.label))
+fit <- euler(e.input)
+res <- plot(fit,
+     fills = list(fill = c(ct2a.color, gl261.color), alpha = 0.5),
+     labels = list(col = "white", font = 4), quantities = T)
+
+a.label = "CT2A" 
+b.label <- "GL261"
+a <- gene.ess.list2$ct2a.gbm.ess
+b <- gene.ess.list2$gl261.gbm.ess
+d <- gene.ess.list2$hs.gbm.ess
+abd <- intersect(intersect(a, b), d)
+e.input <- c("A" = length(setdiff(a, unique(c(b, d)))), 
+             "B" = length(setdiff(b, unique(c(a, d)))), 
+             "D" = length(setdiff(d, unique(c(b, a)))),
+             "A&B" = length(setdiff(intersect(a, b), abd)),
+             "A&D" = length(setdiff(intersect(a, d), abd)),
+             "B&D" = length(setdiff(intersect(b, d), abd)),
+             "A&B&D" = length(abd))
+names(e.input) <- c("CT2A", "GL261", "Hs", "CT2A&GL261", "CT2A&Hs", "GL261&Hs", "CT2A&GL261&Hs")
+fit <- euler(e.input)
+res <- plot(fit,
+     fills = list(fill = c(ct2a.color, gl261.color, "tomato"), alpha = 0.5),
+     labels = list(col = "white", font = 4), quantities = T)
+
+print(res)
+
+upset.Plot(gene.ess.list2)
+```
+
+
+```{r check if essential genes enrich in NMF programs}
+
+g2bf <- bagel.ct2a$BF_T19
+names(g2bf) <- toupper(bagel.ct2a$GENE)
+df.depmap.dt2$bf.ct2a.score <- g2bf[df.depmap.dt2$Gene]
+
+g2bf <- bagel.gl261$BF
+names(g2bf) <- toupper(bagel.gl261$Gene)
+df.depmap.dt2$bf.gl261.score <- g2bf[df.depmap.dt2$Gene]
+
+# get NMF genes 
+df.nmf <- read.csv("C:/Users/n mikolajewicz/Dropbox/PDF Projects - JM/Data/scRNA-seq/01_sci-RNA-seq3_Hong_Kevin_Jason/NM_HH/GBM/Reboot/Results/Reboot6_tumor_comparisons_SET1_v1_Rmd/NMF_genes_010722.csv")
+df.nmf <- df.nmf %>% dplyr::select(-c("X"))
+nmf.list <- wideDF2namedList(df.nmf)
+nmf.list <- lapply(nmf.list, toupper)
+
+murine.gene.list <- list(
+  gl261 = df.depmap.dt2$Gene[df.depmap.dt2$bf.gl261.score > 5],
+  ct2a = df.depmap.dt2$Gene[df.depmap.dt2$bf.ct2a.score > 5]
+)
+
+nmf.gene.hg <- runHG( gene.list = murine.gene.list, gene.universe = df.depmap.dt2$Gene, species = "Hs", my.pathway = nmf.list, my.pathway.representation = "SYMBOL")
+nmf.gene.sum <- summarizeHG(nmf.gene.hg)
+df.nmf.sum <- nmf.gene.sum$results
+
+nmf.gene.sum$plots
+
+df.nmf.sum$overlapGenes
+
+```
+
+
+```{r GL261 vs CT2A essentiality}
+
+df.depmap.dt2$delta.murine <- df.depmap.dt2$bf.ct2a.score - df.depmap.dt2$bf.gl261.score
+df.depmap.dt2$delta.z <- df.depmap.dt2$delta.murine / sd(df.depmap.dt2$delta.murine, na.rm = T)
+df.depmap.dt2$delta.p <- p.adjust(z2p(df.depmap.dt2$delta.z))  #, method = "BH"
+df.depmap.dt2$logp <- sign(df.depmap.dt2$delta.z) * -log10(df.depmap.dt2$delta.p)
+
+df.depmap.dt2.top <- df.depmap.dt2 %>% 
+  dplyr::filter((bf.ct2a.score > 5 & bf.gl261.score < 5) | (bf.ct2a.score < 5 & bf.gl261.score > 5)) %>%
+  dplyr::select(c("Gene", "bf.ct2a.score", "bf.gl261.score", "delta.murine", "logp"))
+
+df.depmap.dt2.top %>%
+  ggplot(aes(x = rank(delta.murine), y = logp)) + 
+  geom_point() + 
+  theme_miko()
+
+murine.gene.list <- list(
+  gl261 = df.depmap.dt2$Gene[df.depmap.dt2$bf.gl261.score > 5 & df.depmap.dt2$bf.ct2a.score < 5],
+  ct2a = df.depmap.dt2$Gene[df.depmap.dt2$bf.gl261.score < 5 & df.depmap.dt2$bf.ct2a.score > 5]
+)
+
+murine.gene.hg <- runHG( gene.list = murine.gene.list, gene.universe = df.depmap.dt2$Gene, species = "Hs", pathway.db = "Bader",
+                         e2s = T
+                          )
+murine.gene.sum <- summarizeHG(murine.gene.hg)
+
+  hg.net.res <- netHG(murine.gene.hg, gene.list = murine.gene.list, gene.universe = df.depmap.dt2$Gene, species = "Hs", fdr.filter = 0.2) 
+  hg.res.sum <- summarizeHG(murine.gene.hg, fdr.threshold = 0.05)
+  df.hg <- hg.res.sum$results
+  
+  df.hg$id <- seq(1, nrow(df.hg))
+df.hg$overlapGenes[df.hg$id %in% 34]
+
+ df.hg.term <- df.hg %>% dplyr::filter(overlap != 0, size > 1)
+  df.terms <- hg.net.res$xx2@compareClusterResult %>% dplyr::filter(GeneRatio >0)
+
+  set.seed(1023)
+  p4 <- emapplot( hg.net.res$xx2, showCategory = 200,  edge.params = list(min = 0.2), max.overlaps = Inf, # list(min = 0.35)
+                  pie.params = list(pie = "equal"),
+                  cex.params = list(category_node = 8, category_label = 0.1, line = 0.001))
+  
+          p4 <- p4 + scale_color_manual(values = c("ct2a" = ct2a.color, "gl261" = gl261.color)) + 
+    scale_fill_manual(values = c("ct2a" = ct2a.color, "gl261" = gl261.color))
+
+  
+  set.seed(1023)
+  p4.nolabel <- emapplot( hg.net.res$xx2, showCategory = 200,  edge.params = list(min = 0.2), max.overlaps = Inf, # list(min = 0.35)
+                          pie.params = list(pie = "equal"),   node_label = "none",
+                          cex.params = list(category_node = 8, category_label = 0.1, line = 0.001))   
+  
+          p4.nolabel <- p4.nolabel + scale_color_manual(values = c("ct2a" = ct2a.color, "gl261" = gl261.color)) + 
+    scale_fill_manual(values = c("ct2a" = ct2a.color, "gl261" = gl261.color))
+  
+  # savePDF("gl261_vs_ct2a_network_enrichment_labeled_all_100423.pdf", p4, fig.width=15, fig.height=15)
+  # savePDF("gl261_vs_ct2a_network_enrichment_unlabeled_all_100423.pdf", p4.nolabel, fig.width=15, fig.height=15)
+  # savePDF("gl261_vs_ct2a_network_enrichment_labeled_v2_100423.pdf", p4, fig.width=15, fig.height=15)
+  # savePDF("gl261_vs_ct2a_network_enrichment_unlabeled_v2_100423.pdf", p4.nolabel, fig.width=15, fig.height=15)
+murine.gene.sum$plots
+
+```
+
+```{r differential BF CT2A vs. GL261, fig.width=3, fig.height=8}
+df.depmap.dt2$delta.murine <- df.depmap.dt2$bf.ct2a.score - df.depmap.dt2$bf.gl261.score
+df.depmap.dt2$delta.z <- df.depmap.dt2$delta.murine / sd(df.depmap.dt2$delta.murine, na.rm = T)
+df.depmap.dt2$delta.p <- p.adjust(z2p(df.depmap.dt2$delta.z))  #, method = "BH"
+df.depmap.dt2$logp <- sign(df.depmap.dt2$delta.z) * -log10(df.depmap.dt2$delta.p)
+
+df.depmap.dt2.top <- df.depmap.dt2 %>% 
+  dplyr::filter((bf.ct2a.score > 5 & bf.gl261.score < 5) | (bf.ct2a.score < 5 & bf.gl261.score > 5)) %>%
+  dplyr::select(c("Gene", "bf.ct2a.score", "bf.gl261.score", "delta.murine", "delta.p", "logp"))
+
+plt.delta.murine <- df.depmap.dt2.top %>%
+  ggplot(aes(x = rank(delta.murine), y = logp)) + 
+  geom_point(aes(size = abs(logp))) + 
+  theme_miko()
+plt.delta.murine
+
+# savePDF("delta_bf_murine_ranked_100423.pdf", plt.delta.murine, fig.width=3, fig.height=8)
+```
+
+
+```{r CT2A vs. GL261 Essentiality, fig.width=8, fig.height=6}
+
+df.depmap.dt2$murine.type <- "Non-Essential"
+df.depmap.dt2$murine.type[df.depmap.dt2$bf.ct2a.score > 5 & df.depmap.dt2$bf.gl261.score <=5] <- "CT2A"
+df.depmap.dt2$murine.type[df.depmap.dt2$bf.ct2a.score <= 5 & df.depmap.dt2$bf.gl261.score >5] <- "GL261"
+df.depmap.dt2$murine.type[df.depmap.dt2$bf.ct2a.score > 5 & df.depmap.dt2$bf.gl261.score >5] <- "Common Essential"
+plt.murine.ess <- df.depmap.dt2 %>%
+  ggplot(aes(x = bf.ct2a.score - 5, y = bf.gl261.score - 5, color = murine.type)) + 
+  annotate("rect", xmin  = -Inf, xmax = 0, ymin = 0, ymax = Inf, alpha = .1,fill = gl261.color)  + 
+  annotate("rect", xmin  = 0, xmax = Inf, ymin = -Inf, ymax = 0, alpha = .1,fill = ct2a.color)  + 
+  geom_point() + 
+  geom_hline(yintercept = 0, linetype = "dashed") + 
+  geom_vline(xintercept = 0, linetype = "dashed") + 
+  labs(x = "CT2A Fitness (Scaled Bayes)", y = "GL261 Fitness (Scaled Bayes)") + 
+  theme_miko(legend = T) + 
+  scale_color_manual(values = c("GL261" = gl261.color, "CT2A" = ct2a.color, "Common Essential" = "black", "Non-Essential" = "grey"))
+
+plt.murine.ess
+# savePDF("murine_essentiality_scatter_bayes_100423.pdf", plt.murine.ess, fig.width=8, fig.height=6)
+
+```
+
+
+```{r network for each subset}
+
+library(clusterProfiler)
+library(DOSE)
+library(enrichplot)
+library(ggnewscale)
+
+common.all <- df.depmap.dt2$Gene[(df.depmap.dt2$logFC.DEP_GBM  > 0 ) & df.depmap.dt2$ct2a.essential.t19 &   df.depmap.dt2$gl261.essential.t15]
+gene.ess.all <- list(
+  t1.common = df.depmap.dt2$Gene[(df.depmap.dt2$logFC.DEP_GBM  > 0 ) & 
+                                   df.depmap.dt2$ct2a.essential.t19 &   
+                                   df.depmap.dt2$gl261.essential.t15],
+  t2.gl261.ct2a = setdiff(intersect(df.depmap.dt2$Gene[ df.depmap.dt2$gl261.essential.t15], 
+                                    df.depmap.dt2$Gene[ df.depmap.dt2$ct2a.essential.t19]), 
+                          common.all),
+  t2.gl261.human = setdiff(intersect(df.depmap.dt2$Gene[ df.depmap.dt2$gl261.essential.t15], 
+                                    df.depmap.dt2$Gene[ df.depmap.dt2$logFC.DEP_GBM  > 0 ]), 
+                          common.all),
+  g2.ct2a.human = setdiff(intersect(df.depmap.dt2$Gene[ df.depmap.dt2$ct2a.essential.t19], 
+                                    df.depmap.dt2$Gene[ df.depmap.dt2$logFC.DEP_GBM  > 0 ]), 
+                          common.all),
+  t3.ct2a =  df.depmap.dt2$Gene[!(df.depmap.dt2$logFC.DEP_GBM  > 0 ) & df.depmap.dt2$ct2a.essential.t19 &   !df.depmap.dt2$gl261.essential.t15],
+  t3.gl261 =  df.depmap.dt2$Gene[!(df.depmap.dt2$logFC.DEP_GBM  > 0 ) & !df.depmap.dt2$ct2a.essential.t19 &   df.depmap.dt2$gl261.essential.t15],
+  t3.human = df.depmap.dt2$Gene[(df.depmap.dt2$logFC.DEP_GBM  > 0 ) & !df.depmap.dt2$ct2a.essential.t19 &   !df.depmap.dt2$gl261.essential.t15]
+)
+
+gs <- gene.ess.all
+all.bg <- df.depmap.dt2$Gene
+hg.res <- runHG(gene.list = gs, gene.universe = all.bg, species = "Hs", e2s = F, pathway.db = "Bader")
+
+which.set <- names(gene.ess.all)
+
+for (i in 1:length(which.set)){
+  hg.net.res <- netHG(hg.res[which.set[i]], gene.list = gs[which.set[i]], gene.universe = all.bg, species = "Hs", fdr.filter = 0.2)
+  hg.res.sum <- summarizeHG(hg.res, fdr.threshold = 0.05)
+  df.hg <- hg.res.sum$results
+
+  df.hg.term <- df.hg %>% dplyr::filter(overlap != 0, size > 1)
+  df.terms <- hg.net.res$xx2@compareClusterResult %>% dplyr::filter(GeneRatio >0)
+
+  set.seed(1023)
+  p4 <- emapplot( hg.net.res$xx2, showCategory = 200,  edge.params = list(min = 0.2), max.overlaps = Inf, # list(min = 0.35)
+                  pie.params = list(pie = "equal"),
+                  cex.params = list(category_node = 0.5, category_label = 0.1, line = 0.01))
+  
+  set.seed(1023)
+  p4.nolabel <- emapplot( hg.net.res$xx2, showCategory = 200,  edge.params = list(min = 0.2), max.overlaps = Inf, # list(min = 0.35)
+                          pie.params = list(pie = "equal"),   node_label = "none",
+                          cex.params = list(category_node = 0.5, category_label = 0.1, line = 0.01))   
+
+  p4 <- p4 + scale_fill_gradient(high = "grey50",  low = "grey50") + scale_color_gradient(high = "grey50", low = "grey50")
+  p4.nolabel <- p4.nolabel + scale_fill_gradient(high = "grey50",  low = "grey50") + scale_color_gradient(high = "grey50", low = "grey50")
+
+}
+
+  
+
+
+```
+
+
+```{r annotate GBM speciic genes}
+
+gene.spec.list <- list(
+  ct2a.gbm.ess =  df.depmap.dt2$Gene[df.depmap.dt2$ct2a.essential.t19],
+  gl261.gbm.ess =  df.depmap.dt2$Gene[df.depmap.dt2$gl261.essential.t15]
+)
+
+gbm.spec <- df.depmap.dt2$Gene[df.depmap.dt2$logFC.DEP_GBM > ess.thresh & df.depmap.dt2$logFC.DEP_Other < ess.thresh]
+gene.spec.list <- lapply(gene.spec.list, function(x) x[(x %in% gbm.spec)])
+
+gs <- gene.spec.list
+all.bg <- df.depmap.dt2$Gene
+hg.res <- runHG(gene.list = gs, gene.universe = all.bg, species = "Hs", e2s = T, pathway.db = "Bader")
+
+  hg.res2 <- hg.res
+  hg.res2$ct2a.gbm.ess$padj <- hg.res2$ct2a.gbm.ess$pval
+  hg.res2$gl261.gbm.ess$padj <- hg.res2$gl261.gbm.ess$pval
+  hg.res.sum <- summarizeHG(hg.res2, fdr.threshold = 0.05)
+  df.hg <- hg.res.sum$results
+  hg.res.sum$plots
+  
+  a <- df.hg %>% dplyr::filter(grepl(toupper("response to Endoplasmic Reticulum Stress"), pathway))
+  a$overlapGenes
+  
+  hg.net.res <- netHG(hg.res2, gene.list = gene.spec.list, gene.universe = all.bg, species = "Hs", fdr.filter = 0.05) # fdr.filter = 2
+  
+  df.hg.term <- df.hg %>% dplyr::filter(overlap != 0, size > 1)
+  df.terms <- hg.net.res$xx2@compareClusterResult %>% dplyr::filter(GeneRatio >0)
+  
+  set.seed(1023)
+  p4 <- emapplot( hg.net.res$xx2, showCategory = 200,  edge.params = list(min = 0.35), max.overlaps = Inf, # list(min = 0.35)
+                  pie.params = list(pie = "count"),
+                  cex.params = list(category_node = 5, category_label = 0.15, line = 0.01))
+  
+  
+  p4 <- p4 + scale_color_manual(values = c("ct2a.gbm.ess" = ct2a.color, "gl261.gbm.ess" = gl261.color)) + 
+    scale_fill_manual(values = c("ct2a.gbm.ess" = ct2a.color, "gl261.gbm.ess" = gl261.color))
+  
+
+  
+  set.seed(1023)
+  p4.nolabel <- emapplot( hg.net.res$xx2, showCategory = 200,  edge.params = list(min = 0.35), max.overlaps = Inf, # list(min = 0.35)
+                          pie.params = list(pie = "count"),   node_label = "none",
+                          cex.params = list(category_node = 5, category_label = 0.2, line = 0.01))   
+  
+      p4.nolabel <- p4.nolabel + scale_color_manual(values = c("ct2a.gbm.ess" = ct2a.color, "gl261.gbm.ess" = gl261.color)) + 
+    scale_fill_manual(values = c("ct2a.gbm.ess" = ct2a.color, "gl261.gbm.ess" = gl261.color))
+  
+      
+  #     savePDF("gbm_specific_murine_label_V2.pdf", p4, fig.width=8, fig.height=8)
+  # savePDF("gbm_specific_murine_label.pdf", p4, fig.width=8, fig.height=8)
+  # savePDF("gbm_specific_murine_nolabel.pdf", p4.nolabel, fig.width=8, fig.height=8)
+
+```
+
+
+```{r show overlap between murine and human GBM-specific essentials,  fig.width=23, fig.height=2}
+
+df.ess <- df.depmap.dt2 %>%
+  dplyr::filter(logFC.DEP_GBM > 0, logFC.DEP_Other < 0) %>%
+  dplyr::mutate(human = logFC.DEP_GBM > 0,
+                gl261 = gl261.essential.t15,
+                ct2a = ct2a.essential.t19) %>%
+  dplyr::select(c("Gene", "human", "ct2a", "gl261"))
+
+df.ess2 <- df.ess
+df.ess2$n <- apply(df.ess[, c("human", "ct2a", "gl261")], 1, sum)
+df.ess2 <- df.ess2 %>% dplyr::arrange(-n)
+
+df.ess.long <- pivot_longer(df.ess, cols = c("human", "ct2a", "gl261"))
+df.ess.long.sum <- df.ess.long %>% 
+  dplyr::group_by(name) %>%
+  dplyr::summarize(n = sum(value)) %>%
+  dplyr::mutate(prop.n = n/max(n))
+
+
+df.ess.long.sum %>%
+  ggplot(aes(x = name, y = prop.n)) + 
+  geom_bar(stat = "identity")
+
+plt.member <- df.ess.long %>%
+  dplyr::group_by(name) %>%
+  dplyr::arrange(value*1) %>%
+  dplyr::mutate(Gene = factor(Gene, levels = unique(as.character(df.ess2$Gene)))) %>%
+  ggplot(aes(y = name, x = Gene, color = value, fill = value)) + 
+  geom_point(size = 3) +
+  # geom_tile() + 
+  theme_miko(grid = T, x.axis.rotation = 45) + 
+  scale_color_manual(values = c("TRUE" = "grey20", "FALSE" = "white")) + 
+  scale_fill_manual(values = c("TRUE" = "grey30", "FALSE" = "white"))
+
+plt.member
+
+# savePDF("specific_member_090423.pdf", plt.member, fig.width=23, fig.height=2 )
+
+```
+
+
+
+```{r evaluate TFs in screens, fig.width=10, fig.height=4}
+
+tf.list <- readRDS("REBOOT11_PHENOTYPIC_TFs_131223.rds")
+
+tf.list$TF1_mesenchymal <- c("Eno1","Nfkbia","Cebpd", "Klf6" , "Epas1", "Hspb1", "Ybx3", "Neat1", "Arid5b", "Wwtr1", "Prrx1", "Zfp36l1" ) 
+tf.list$TF2_cycling <- c("Ptma", "Hmgb1", "Ezh2", "Hmgb3",  "Dek",  "Hmgn1", "Hmgb2", "Pttg1", "Dnmt1", "Kpna2", "Bub3", "Ilf2", "Mis18bp1", "Foxm1", "Cenpa", "Mxd3",  "Mybl2", "Brca2", "Tcf19", "E2f1", "Bard1", "Brca1" )                              
+tf.list$TF3_developmental <- c("Nfia", "Npas3", "Tsc22d1", "Scd5", "Tsc22d4", "Pbx1", "Zbtb20", "Hes6", "Olig1", "Ascl1", "Olig2", "Sox8", "Tcf4", "Nfib", "Sox4", "Lmo4", "Sox2", "Etv1", "Gtf2i", "Tcf12", "Ccdc88a", "Sox6", "Zeb1")
+
+df.depmap.tf <- df.depmap.dt2 %>% dplyr::filter(Gene %in% toupper(unique(unlist(tf.list))))
+df.depmap.tf$tf <- "other"
+df.depmap.tf$tf[df.depmap.tf$Gene %in% toupper(tf.list$TF1_mesenchymal)] <- "mesenchymal"
+df.depmap.tf$tf[df.depmap.tf$Gene %in% toupper(tf.list$TF2_cycling)] <- "cycling"
+df.depmap.tf$tf[df.depmap.tf$Gene %in% toupper(tf.list$TF3_developmental)] <- "developmental"
+
+df.depmap.tf$BF_GBM <- df.depmap.tf$logFC.DEP_GBM
+df.depmap.tf$BF_GL261 <- df.depmap.tf$bf.gl261.score
+df.depmap.tf$BF_CT2A <- df.depmap.tf$bf.ct2a.score
+
+df.depmap.tf.long <- pivot_longer(df.depmap.tf %>% 
+                                    dplyr::select(c("Gene", "tf", c("BF_GBM", "BF_GL261", "BF_CT2A"))), 
+                                  cols = c("BF_GBM", "BF_GL261", "BF_CT2A"))
+colnames(df.depmap.tf.long) <- c("gene", "tf", "model", "bf")
+
+df.depmap.tf.long.sum <- df.depmap.tf.long %>%
+  dplyr::group_by(tf, model) %>%
+  dplyr::summarise(bf.sig.rate = mean(bf[!is.na(bf)] > 0),
+                   bf.sig.n = sum(bf[!is.na(bf)] > 0))
+
+
+df.depmap.tf.long <- df.depmap.tf.long %>%
+  dplyr::mutate(model = factor(model, levels = c("BF_CT2A", "BF_GL261", "BF_GBM"))) 
+
+df.depmap.tf.long$is.cycle <- df.depmap.tf.long$tf %in% "cycling"
+
+p.ct2a <- wilcox.test(bf ~ is.cycle, data = df.depmap.tf.long %>% dplyr::filter(model %in% "BF_CT2A"))$p.value
+p.gl261 <- wilcox.test(bf ~ is.cycle, data = df.depmap.tf.long %>% dplyr::filter(model %in% "BF_GL261"))$p.value
+p.gbm <- wilcox.test(bf ~ is.cycle, data = df.depmap.tf.long %>% dplyr::filter(model %in% "BF_GBM"))$p.value
+
+plt.tf <- df.depmap.tf.long %>%
+  ggplot(aes(x = tf, y = bf)) + 
+  geom_boxplot() + 
+  geom_point() + 
+  ggrepel::geom_text_repel(data = df.depmap.tf.long %>% dplyr::filter(bf > 0), aes(x = tf, y = bf, label = gene), max.overlaps = Inf, size = 2) + 
+  facet_wrap(~model, scales = "free_y") + 
+  theme_miko() + 
+  geom_hline(yintercept = 0, linetype = "dashed") 
+
+
+plt.tf
+
+# savePDF("Reboot10_tf_bf_profiles_090224.pdf", plt.tf, fig.width=10, fig.height=4)
+# df.depmap.tf %>%
+#   ggplot(aes(x = tf, y =bf.ct2a.score )) + 
+#   geom_boxplot()
+```
+
+
+```{r net hg analysis}
+
+ct2a.color <- brewer.pal(n = 3, "BrBG")[3]
+gl261.color <- brewer.pal(n = 3, "BrBG")[1]
+
+gene.ess.list2 <- list(
+    common.gl261 = df.depmap.dt2$Gene[(df.depmap.dt2$logFC.DEP_GBM  > 0 ) & df.depmap.dt2$ct2a.essential.t19], 
+     common.ct2a =   df.depmap.dt2$Gene[(df.depmap.dt2$logFC.DEP_GBM  > 0 ) &   df.depmap.dt2$gl261.essential.t15],
+  human = df.depmap.dt2$Gene[(df.depmap.dt2$logFC.DEP_GBM  > 0) & !df.depmap.dt2$ct2a.essential.t19 & !df.depmap.dt2$gl261.essential.t15],
+  ct2a = df.depmap.dt2$Gene[(df.depmap.dt2$logFC.DEP_GBM  <= 0) & df.depmap.dt2$ct2a.essential.t19 & !df.depmap.dt2$gl261.essential.t15],
+  gl261 = df.depmap.dt2$Gene[(df.depmap.dt2$logFC.DEP_GBM  <= 0) & !df.depmap.dt2$ct2a.essential.t19 & df.depmap.dt2$gl261.essential.t15]
+)
+
+gs <- gene.ess.list2
+all.bg <- df.depmap.dt2$Gene
+hg.res <- runHG(gene.list = gs, gene.universe = all.bg, species = "Hs", e2s = F, pathway.db = "Bader")
+hg.net.res <- netHG(hg.res, gene.list = gs, gene.universe = all.bg, species = "Hs", fdr.filter = 0.2) # fdr.filter = 2
+hg.res.sum <- summarizeHG(hg.res, fdr.threshold = 0.05)
+df.hg <- hg.res.sum$results
+hg.res.sum$plots
+
+df.hg.term <- df.hg %>% dplyr::filter(overlap != 0, size > 1)
+df.terms <- hg.net.res$xx2@compareClusterResult %>% dplyr::filter(GeneRatio >0)
+  p4 <- emapplot( hg.net.res$xx2, showCategory = 200,  edge.params = list(min = 0.35), max.overlaps = Inf, # list(min = 0.35)
+                  pie.params = list(pie = "Count"),
+                  cex.params = list(category_node = 5, category_label = 0.1, line = 0.01))
+  
+  col.pal <- ggthemes::ptol_pal()(4)
+names(col.pal) <- c( "BM","GBM", "NPH",  "PCNSL")
+
+
+```
+
+```{r GBM specific profile, fig.width=3, fig.height=8}
+
+df.depmap.dt2$delta_GBM_z <- (df.depmap.dt2$logFC.DEP_GBM - df.depmap.dt2$logFC.DEP_Other) / sd(df.depmap.dt2$logFC.DEP_GBM - df.depmap.dt2$logFC.DEP_Other)
+
+df.depmap.dt3 <- df.depmap.dt2 %>% dplyr::filter(logFC.DEP_GBM > 0 & logFC.DEP_Other < 0 | logFC.DEP_Other > 0 & logFC.DEP_GBM < 0 )
+df.depmap.dt3$rank.delta <- rank(df.depmap.dt3$delta_GBM_z, ties.method = "random")
+df.depmap.dt3.label <- df.depmap.dt3 %>% dplyr::filter(delta_GBM_z > 3.5,logFC.DEP_GBM> 0, logFC.DEP_Other < 0, logFC.DEP_GBM - logFC.DEP_Other > 3)
+df.depmap.dt3$delta_GBM_p <- p.adjust(z2p(df.depmap.dt3$delta_GBM_z), method = "BH") 
+
+df.depmap.dt3$delta_GBM_p.lab <- df.depmap.dt3$delta_GBM_p
+df.depmap.dt3$delta_GBM_p.lab[df.depmap.dt3$delta_GBM_p.lab > 0.05] <- 1
+plt.rank <- df.depmap.dt3 %>%
+  ggplot(aes(x = rank.delta, y = -log10(delta_GBM_p) * sign(delta_GBM_z))) + 
+  geom_point(aes(size = abs(-log10(delta_GBM_p.lab)))) + 
+  labs(x = "Rank", y = "GBM-Specific Fitness (Z score, GBM - Other)") + 
+  theme_miko()
+
+
+plt.rank 
+# savePDF("delta_fitness_090423.pdf",plt.rank, fig.width=3, fig.height=8 )
+df.gsea <- gsea.res$gse.pathway
+
+```
+
+
+
+```{r project score essentiality, fig.width = 7, fig.height = 5}
+
+df.depmap.dt2$delta_GBM_z <- (df.depmap.dt2$logFC.DEP_GBM - df.depmap.dt2$logFC.DEP_Other) / sd(df.depmap.dt2$logFC.DEP_GBM - df.depmap.dt2$logFC.DEP_Other)
+df.depmap.dt2.label <- df.depmap.dt2 %>% dplyr::filter(delta_GBM_z > 3.5,logFC.DEP_GBM> 0, logFC.DEP_Other < 0, logFC.DEP_GBM - logFC.DEP_Other > 3)
+df.depmap.dt2$type <- "Non-Essential"
+df.depmap.dt2$type[df.depmap.dt2$logFC.DEP_GBM > 0 & df.depmap.dt2$logFC.DEP_Other > 0] <- "Common-Essential"
+df.depmap.dt2$type[df.depmap.dt2$logFC.DEP_GBM > 0 & df.depmap.dt2$logFC.DEP_Other< 0] <- "GBM"
+
+plt.gene.ess <- df.depmap.dt2 %>%
+  ggplot(aes(x = logFC.DEP_Other, y = logFC.DEP_GBM)) +
+    annotate("rect", xmin  = -Inf, xmax = 0, ymin = 0, ymax = Inf, alpha = .1,fill = "red")  + 
+  annotate("rect", xmin  = 0, xmax = Inf, ymin = 0, ymax = Inf, alpha = .1,fill = "blue")  + 
+   annotate("rect", xmin  = -Inf, xmax = Inf, ymin = -Inf, ymax = 0, alpha = .3,fill = "grey")  + 
+    annotate("rect", xmin  = 0, xmax = Inf, ymin = -Inf, ymax = 0, alpha = .3,fill = "yellow")  +
+  geom_point(aes(color = type)) + 
+  labs(y = "GBM (Scaled BF)", x = "Non-CNS Malignancy (Scaled BF)") + 
+  geom_abline(color = "black") + 
+  geom_hline(yintercept = 0, linetype = "dashed") + 
+  geom_vline(xintercept = 0, linetype = "dashed") + 
+  theme_miko(legend = T)+ 
+
+  scale_color_manual(values = c("GBM" = "tomato", "Non-Essential" = "grey",  "Other" = "grey20","Common-Essential" = scales::muted("blue"))) 
+
+
+plt.gene.ess
+
+# savePDF("essentiality_profile_project_score_090423.pdf", plt.gene.ess, fig.width = 7, fig.height = 5)
+
+```
+
+
+
+```{r prognostic value of GBM vs. non-GBM specific essentials}
+
+df.surv.res <- readxl::read_xlsx("C:/Users/n mikolajewicz/Dropbox/PDF Projects - JM/Data/scRNA-seq/01_sci-RNA-seq3_Hong_Kevin_Jason/NM_HH/PR_GBM/Data/GBM_mrna_oncolnc_SURVIVAL_160823.xlsx")
+
+colnames(df.surv.res) <- c("id", "gene_old", "id_updated", "gene", "coef", "p", "fdr", "median_expr", "mean_expr", "other")
+
+threshold = 0.01
+
+top.n <- 25
+df.depmap.dt4 <- bind_rows(df.depmap.dt3 %>% dplyr::top_n(top.n,delta_GBM_z),
+                           df.depmap.dt3 %>% dplyr::top_n(top.n,-delta_GBM_z))
+
+gs.hs.list <- list(
+ gbm = df.depmap.dt3$Gene[(df.depmap.dt4$delta_GBM_z > 0) & (df.depmap.dt4$delta_GBM_p < threshold)],
+ non_gbm =  df.depmap.dt3$Gene[(df.depmap.dt4$delta_GBM_z < 0) & (df.depmap.dt4$delta_GBM_p < threshold)]
+)
+
+df.surv.res$type <- "other"
+df.surv.res$type[df.surv.res$gene %in% gs.hs.list$gbm] <- "gbm"
+df.surv.res$type[df.surv.res$gene %in% gs.hs.list$non_gbm] <- "non_gbm"
+
+df.surv.res.relevant <- df.surv.res %>% dplyr::filter(type %in% c("gbm", "non_gbm"))
+df.surv.res.relevant <- df.surv.res
+
+df.surv.res.relevant$logp <- exp(df.surv.res.relevant$coef)
+
+t.test(df.surv.res.relevant$logp[df.surv.res.relevant$type %in% "gbm"], 
+       df.surv.res.relevant$logp[df.surv.res.relevant$type %in% "non_gbm"])
+
+wilcox.test(df.surv.res.relevant$logp[df.surv.res.relevant$type %in% "gbm"], 
+       df.surv.res.relevant$logp[df.surv.res.relevant$type %in% "non_gbm"])
+
+df.surv.res.relevant %>%
+  dplyr::filter(type != "other") %>%
+  ggplot(aes(x = type , y = logp)) + 
+  geom_boxplot()  +
+  geom_hline(yintercept =1, linetype = "dashed")
+
+```
+
+
+```{r compare BF scores across essential and non-essential sets, fig.width=6, fig.height=4}
+
+g2bf <- bagel.ct2a$BF_T19
+names(g2bf) <- toupper(bagel.ct2a$GENE)
+df.depmap.dt2$bf.ct2a.score <- g2bf[df.depmap.dt2$Gene]
+
+g2bf <- bagel.gl261$BF
+names(g2bf) <- toupper(bagel.gl261$Gene)
+df.depmap.dt2$bf.gl261.score <- g2bf[df.depmap.dt2$Gene]
+p1 <- df.depmap.dt2 %>%
+  ggplot(aes(x = type, y = bf.gl261.score - 5)) + 
+  geom_boxplot(aes(fill = type), outlier.size = 0.1) + 
+  theme_miko(legend = T) + 
+  geom_hline(yintercept = 0, linetype = "dashed") + 
+  scale_fill_manual(values = c("GBM" = "tomato", "Non-Essential" = "grey", "Common-Essential" = scales::muted("blue")))  + 
+  labs(y = "Scaled BF (BF - 5)", title = "GL261")
+
+df.score.comp <- bind_rows(
+  data.frame(
+    cell = "GL261",
+    type = df.depmap.dt2$type,
+    bf = df.depmap.dt2$bf.gl261.score
+  ),
+    data.frame(
+    cell = "CT2A",
+    type = df.depmap.dt2$type,
+    bf = df.depmap.dt2$bf.ct2a.score
+  )
+)
+
+p2 <- df.depmap.dt2 %>%
+  ggplot(aes(x = type, y = bf.ct2a.score - 5)) + 
+  geom_boxplot(aes(fill = type), outlier.size = 0.1) +
+  theme_miko(legend = T) + 
+  geom_hline(yintercept = 0, linetype = "dashed") + 
+  scale_fill_manual(values = c("GBM" = "tomato", "Non-Essential" = "grey", "Common-Essential" = scales::muted("blue")))  + 
+  scale_color_manual(values = c("GBM" = "tomato", "Non-Essential" = "grey", "Common-Essential" = scales::muted("blue")))  + 
+  labs(y = "Scaled BF (BF - 5)", title = "CT2A")
+
+plt.type.vs.score <-df.score.comp %>%
+  dplyr::mutate(type = factor(type, levels = c("Common-Essential", "GBM", "Other", "Non-Essential"))) %>%
+  ggplot(aes(x = type, y = bf - 5, fill = cell)) + 
+  geom_boxplot( outlier.size = 0.1) +
+  theme_miko(legend = T) + 
+  geom_hline(yintercept = 0, linetype = "dashed") + 
+  labs(y = "Scaled BF (BF - 5)", title = "BF scores", subtitle = "GL261 vs. CT2A")
+
+plt.type.vs.score
+# savePDF("type_vs_score_090423.pdf", plt.type.vs.score, fig.width = 6, fig.height = 4)
+
+```
+
+```{r ROC plots}
+
+ess.thresh <- 0
+sum(df.depmap.dt2$logFC.DEP_GBM > ess.thresh)
+hs.gbm.ess <- df.depmap.dt2$Gene[df.depmap.dt2$logFC.DEP_GBM > ess.thresh]
+
+g2bf <- bagel.ct2a$BF_T19
+names(g2bf) <- toupper(bagel.ct2a$GENE)
+df.depmap.dt2$bf.ct2a.score <- g2bf[df.depmap.dt2$Gene]
+
+g2bf <- bagel.gl261$BF
+names(g2bf) <- toupper(bagel.gl261$Gene)
+df.depmap.dt2$bf.gl261.score <- g2bf[df.depmap.dt2$Gene]
+# 
+### THIS NORMALIZATION
+df.depmap.dt2$delta_GBM_z <- (df.depmap.dt2$logFC.DEP_GBM - df.depmap.dt2$logFC.DEP_Other) / sd(df.depmap.dt2$logFC.DEP_GBM - df.depmap.dt2$logFC.DEP_Other)
+df.depmap.dt2$Gene2 <- df.depmap.dt2$Gene
+
+df.depmap.dt2$delta_GBM_p <- p.adjust(z2p(df.depmap.dt2$delta_GBM_z), method = "BH")
+df.depmap.dt2$GBM.specific <-  df.depmap.dt2$logFC.DEP_GBM > 0 & df.depmap.dt2$logFC.DEP_Other <0
+
+sum(df.depmap.dt2$GBM.specific )
+
+# START HERE #########################################
+
+n.length <- 1000
+min.bf <- min(c(df.depmap.dt2$bf.ct2a.score, df.depmap.dt2$bf.gl261.score), na.rm = T)
+max.bf <- max(c(df.depmap.dt2$bf.ct2a.score, df.depmap.dt2$bf.gl261.score), na.rm = T)
+bin.width <- (max.bf - min.bf)/n.length
+
+all.thresholds <- 5
+for (i in 1:n.length){
+   all.thresholds <- c(all.thresholds, min.bf + (i*bin.width))
+}
+all.thresholds <- all.thresholds[order(all.thresholds)]
+
+library(caret)
+df.ct2a.roc <-df.ct2a.roc.gs <- 
+  df.gl261.roc <-df.gl261.roc.gs <- 
+  df.ct2a.other.roc <- df.gl261.other.roc <-  
+  df.ct2a.glioma.roc <- df.gl261.glioma.roc <- NULL
+for (i in 1:length(all.thresholds)){
+  
+  current.threshold <- all.thresholds[i]
+
+  try({
+    df.pred.obs <- data.frame(
+      truth = df.depmap.dt2$logFC.DEP_GBM > ess.thresh,
+      observed = df.depmap.dt2$bf.ct2a.score > current.threshold
+    )
+    df.pred.obs <- df.pred.obs[complete.cases(df.pred.obs), ]
+    table(df.pred.obs$truth, df.pred.obs$observed)
+    cm.res <- confusionMatrix(table(df.pred.obs$observed, df.pred.obs$truth), pos = "TRUE")
+    df.ct2a.roc <- bind_rows(df.ct2a.roc, 
+                        data.frame(
+                          threshold = current.threshold,
+                          accuracy = mean(df.pred.obs$observed == df.pred.obs$truth),
+                          error = mean(df.pred.obs$observed != df.pred.obs$truth),
+                          sensitivity = cm.res[["byClass"]][["Sensitivity"]],
+                          specificity = cm.res[["byClass"]][["Specificity"]],
+                          precision = cm.res[["byClass"]][["Precision"]],
+                          recall = cm.res[["byClass"]][["Recall"]]
+                        ))
+  })
+  
+    # CT2A OTHER
+  try({
+    df.pred.obs <- data.frame(
+      truth = df.depmap.dt2$logFC.DEP_Other > ess.thresh,
+      observed = df.depmap.dt2$bf.ct2a.score > current.threshold
+    )
+    df.pred.obs <- df.pred.obs[complete.cases(df.pred.obs), ]
+    table(df.pred.obs$truth, df.pred.obs$observed)
+    cm.res <- confusionMatrix(table(df.pred.obs$observed, df.pred.obs$truth), pos = "TRUE")
+    df.ct2a.other.roc <- bind_rows(df.ct2a.other.roc, 
+                        data.frame(
+                          threshold = current.threshold,
+                          accuracy = mean(df.pred.obs$observed == df.pred.obs$truth),
+                          error = mean(df.pred.obs$observed != df.pred.obs$truth),
+                          sensitivity = cm.res[["byClass"]][["Sensitivity"]],
+                          specificity = cm.res[["byClass"]][["Specificity"]],
+                          precision = cm.res[["byClass"]][["Precision"]],
+                          recall = cm.res[["byClass"]][["Recall"]]
+                        ))
+  })
+  
+      # CT2A GLIOMA
+  try({
+    df.pred.obs <- data.frame(
+      truth = df.depmap.dt2$logFC.DEP_Glioma > ess.thresh,
+      observed = df.depmap.dt2$bf.ct2a.score > current.threshold
+    )
+    df.pred.obs <- df.pred.obs[complete.cases(df.pred.obs), ]
+    table(df.pred.obs$truth, df.pred.obs$observed)
+    cm.res <- confusionMatrix(table(df.pred.obs$observed, df.pred.obs$truth), pos = "TRUE")
+    df.ct2a.glioma.roc <- bind_rows(df.ct2a.glioma.roc, 
+                        data.frame(
+                          threshold = current.threshold,
+                          accuracy = mean(df.pred.obs$observed == df.pred.obs$truth),
+                          error = mean(df.pred.obs$observed != df.pred.obs$truth),
+                          sensitivity = cm.res[["byClass"]][["Sensitivity"]],
+                          specificity = cm.res[["byClass"]][["Specificity"]],
+                          precision = cm.res[["byClass"]][["Precision"]],
+                          recall = cm.res[["byClass"]][["Recall"]]
+                        ))
+  })
+  
+    # GL261 ESSENTIAL
+  try({
+    df.pred.obs <- data.frame(
+      truth = df.depmap.dt2$logFC.DEP_GBM > ess.thresh,
+      observed = df.depmap.dt2$bf.gl261.score > current.threshold
+    )
+    df.pred.obs <- df.pred.obs[complete.cases(df.pred.obs), ]
+    table(df.pred.obs$truth, df.pred.obs$observed)
+    cm.res <- confusionMatrix(table(df.pred.obs$observed, df.pred.obs$truth), pos = "TRUE")
+    df.gl261.roc <- bind_rows(df.gl261.roc, 
+                        data.frame(
+                          threshold = current.threshold,
+                          accuracy = mean(df.pred.obs$observed == df.pred.obs$truth),
+                          error = mean(df.pred.obs$observed != df.pred.obs$truth),
+                          sensitivity = cm.res[["byClass"]][["Sensitivity"]],
+                          specificity = cm.res[["byClass"]][["Specificity"]],
+                          precision = cm.res[["byClass"]][["Precision"]],
+                          recall = cm.res[["byClass"]][["Recall"]]
+                        ))
+  })
+  
+      # GL261 OTHER
+  try({
+    df.pred.obs <- data.frame(
+      truth = df.depmap.dt2$logFC.DEP_Other > ess.thresh,
+      observed = df.depmap.dt2$bf.gl261.score > current.threshold
+    )
+    df.pred.obs <- df.pred.obs[complete.cases(df.pred.obs), ]
+    table(df.pred.obs$truth, df.pred.obs$observed)
+    cm.res <- confusionMatrix(table(df.pred.obs$observed, df.pred.obs$truth), pos = "TRUE")
+    df.gl261.other.roc <- bind_rows(df.gl261.other.roc, 
+                        data.frame(
+                          threshold = current.threshold,
+                          accuracy = mean(df.pred.obs$observed == df.pred.obs$truth),
+                          error = mean(df.pred.obs$observed != df.pred.obs$truth),
+                          sensitivity = cm.res[["byClass"]][["Sensitivity"]],
+                          specificity = cm.res[["byClass"]][["Specificity"]],
+                          precision = cm.res[["byClass"]][["Precision"]],
+                          recall = cm.res[["byClass"]][["Recall"]]
+                        ))
+  })
+  
+        # GL261 GLIOMA
+  try({
+    df.pred.obs <- data.frame(
+      truth = df.depmap.dt2$logFC.DEP_Glioma > ess.thresh,
+      observed = df.depmap.dt2$bf.gl261.score > current.threshold
+    )
+    df.pred.obs <- df.pred.obs[complete.cases(df.pred.obs), ]
+    table(df.pred.obs$truth, df.pred.obs$observed)
+    cm.res <- confusionMatrix(table(df.pred.obs$observed, df.pred.obs$truth), pos = "TRUE")
+    df.gl261.glioma.roc <- bind_rows(df.gl261.glioma.roc, 
+                        data.frame(
+                          threshold = current.threshold,
+                          accuracy = mean(df.pred.obs$observed == df.pred.obs$truth),
+                          error = mean(df.pred.obs$observed != df.pred.obs$truth),
+                          sensitivity = cm.res[["byClass"]][["Sensitivity"]],
+                          specificity = cm.res[["byClass"]][["Specificity"]],
+                          precision = cm.res[["byClass"]][["Precision"]],
+                          recall = cm.res[["byClass"]][["Recall"]]
+                        ))
+  })
+  
+  
+  
+  # GBM-specific gene recovery #################################################
+
+  try({
+    df.pred.obs.spec <- data.frame(
+      truth = df.depmap.dt2$GBM.specific,
+      observed = df.depmap.dt2$bf.ct2a.score > current.threshold
+    )
+    
+    df.pred.obs.spec <- df.pred.obs.spec[!(df.depmap.dt2$type %in% "Common-Essential"), ]
+    # df.pred.obs.spec <- df.pred.obs.spec %>% dplyr::filter(!(type %in% "Common-Essential"))
+    df.pred.obs.spec <- df.pred.obs.spec[complete.cases(df.pred.obs.spec), ]
+    cm.spec.res <- confusionMatrix(table(df.pred.obs.spec$observed, df.pred.obs.spec$truth), pos = "TRUE") 
+    df.ct2a.roc.gs <- bind_rows(df.ct2a.roc.gs, 
+                                data.frame(
+                                  threshold = current.threshold,
+                                  accuracy = mean(df.pred.obs.spec$observed == df.pred.obs.spec$truth),
+                                  error = mean(df.pred.obs.spec$observed != df.pred.obs.spec$truth),
+                                  sensitivity = cm.spec.res[["byClass"]][["Sensitivity"]],
+                                  specificity = cm.spec.res[["byClass"]][["Specificity"]],
+                          precision = cm.spec.res[["byClass"]][["Precision"]],
+                          recall = cm.spec.res[["byClass"]][["Recall"]]
+                                ))
+  })
+  # 
+    try({
+    df.pred.obs.spec <- data.frame(
+      truth = df.depmap.dt2$GBM.specific,
+      observed = df.depmap.dt2$bf.gl261.score > current.threshold
+    )
+    df.pred.obs.spec <- df.pred.obs.spec[!(df.depmap.dt2$type %in% "Common-Essential"), ]
+    df.pred.obs.spec <- df.pred.obs.spec[complete.cases(df.pred.obs.spec), ]
+    cm.spec.res <- confusionMatrix(table(df.pred.obs.spec$observed, df.pred.obs.spec$truth), pos = "TRUE") 
+    df.gl261.roc.gs <- bind_rows(df.gl261.roc.gs, 
+                                data.frame(
+                                  threshold = current.threshold,
+                                  accuracy = mean(df.pred.obs.spec$observed == df.pred.obs.spec$truth),
+                                  error = mean(df.pred.obs.spec$observed != df.pred.obs.spec$truth),
+                                  sensitivity = cm.spec.res[["byClass"]][["Sensitivity"]],
+                                  specificity = cm.spec.res[["byClass"]][["Specificity"]],
+                          precision = cm.spec.res[["byClass"]][["Precision"]],
+                          recall = cm.spec.res[["byClass"]][["Recall"]]
+                                ))
+  })
+}
+
+simple_auc <- function(TPR, FPR){
+  # inputs already sorted, best scores first 
+  dFPR <- c(diff(FPR), 0)
+  dTPR <- c(diff(TPR), 0)
+  sum(TPR * dFPR) + sum(dTPR * dFPR)/2
+}
+
+append0 <- function(x){
+    x <- bind_rows(x,
+                  data.frame(
+                    threshold = min(x$threshold)-1,
+                    accuracy = NA,
+                    error = NA,
+                    sensitivity = 1,
+                    specificity = 0,
+                    recall = 1,
+                    precision = 0
+                  ))
+    
+    x <- x %>% dplyr::arrange(threshold)
+    return(x)
+}
+
+df.ct2a.roc <- append0(df.ct2a.roc)
+df.ct2a.roc.gs <- append0(df.ct2a.roc.gs)
+df.ct2a.other.roc <- append0(df.ct2a.other.roc)
+df.ct2a.glioma.roc <- append0(df.ct2a.glioma.roc)
+df.gl261.roc <- append0(df.gl261.roc)
+df.gl261.roc.gs <- append0(df.gl261.roc.gs)
+df.gl261.other.roc <- append0(df.gl261.other.roc)
+df.gl261.glioma.roc <- append0(df.gl261.glioma.roc)
+
+ct2a.auc.val <- signif(with(df.ct2a.roc, simple_auc(sensitivity, specificity)), 3)
+ct2a.auc.val.gs <- signif(with(df.ct2a.roc.gs, simple_auc(sensitivity, specificity)), 3)
+ct2a.auc.val.other <- signif(with(df.ct2a.other.roc, simple_auc(sensitivity, specificity)), 3)
+ct2a.auc.val.glioma <- signif(with(df.ct2a.glioma.roc, simple_auc(sensitivity, specificity)), 3)
+
+gl261.auc.val <- signif(with(df.gl261.roc, simple_auc(sensitivity, specificity)), 3)
+gl261.auc.val.gs <- signif(with(df.gl261.roc.gs, simple_auc(sensitivity, specificity)), 3)
+gl261.auc.val.other <- signif(with(df.gl261.other.roc, simple_auc(sensitivity, specificity)), 3)
+gl261.auc.val.glioma <- signif(with(df.gl261.glioma.roc, simple_auc(sensitivity, specificity)), 3)
+
+ct2a.auprc.val <- signif(with(df.ct2a.roc, simple_auc(precision, 1-recall)), 3)
+ct2a.auprc.val.gs <- signif(with(df.ct2a.roc.gs, simple_auc(precision, 1-recall)), 3)
+ct2a.auprc.val.other <- signif(with(df.ct2a.other.roc, simple_auc(precision, 1-recall)), 3)
+ct2a.auprc.val.glioma <- signif(with(df.ct2a.glioma.roc, simple_auc(precision, 1-recall)), 3)
+
+gl261.auprc.val <- signif(with(df.gl261.roc, simple_auc(precision, 1-recall)), 3)
+gl261.auprc.val.gs <- signif(with(df.gl261.roc.gs, simple_auc(precision, 1-recall)), 3)
+gl261.auprc.val.other <- signif(with(df.gl261.other.roc, simple_auc(precision, 1-recall)), 3)
+gl261.auprc.val.glioma <- signif(with(df.gl261.glioma.roc, simple_auc(precision, 1-recall)), 3)
+
+df.ct2a.roc$recovery.type <- "gbm.essential"
+df.ct2a.roc.gs$recovery.type <- "gbm.specific"
+df.ct2a.other.roc$recovery.type <- "other.essential"
+df.ct2a.glioma.roc$recovery.type <- "glioma.essential"
+# df.roc.ct2a <- bind_rows(df.ct2a.roc,df.ct2a.roc.gs, df.ct2a.other.roc, df.ct2a.glioma.roc)
+df.roc.ct2a <- bind_rows(df.ct2a.roc, df.ct2a.other.roc)
+
+df.gl261.roc$recovery.type <- "gbm.essential"
+df.gl261.roc.gs$recovery.type <- "gbm.specific"
+df.gl261.other.roc$recovery.type <- "other.essential"
+df.gl261.glioma.roc$recovery.type <- "glioma.essential"
+df.roc.gl261 <- bind_rows(df.gl261.roc, df.gl261.other.roc)
+
+
+df.roc.ct2a.cutoff <- df.roc.ct2a[df.roc.ct2a$threshold %in% 5, ]
+df.roc.gl261.cutoff <- df.roc.gl261[df.roc.gl261$threshold %in% 5, ]
+
+plt.ct2a.roc <- df.roc.ct2a %>%
+  ggplot(aes(x = 1-specificity, y = sensitivity, color = recovery.type)) + 
+  geom_line() + 
+  geom_abline(linetype = "dashed") + 
+  labs(title = "CT2A Recovery of Human GBM Essential Genes", subtitle = paste0("GBM = ", ct2a.auc.val, "; Other = ", ct2a.auc.val.other, "; Glioma = ", ct2a.auc.val.glioma, "; GBM-specific = ", ct2a.auc.val.gs)) + 
+  theme_miko(grid = F, legend = T)
+
+plt.gl261.roc <- df.roc.gl261 %>%
+  ggplot(aes(x = 1-specificity, y = sensitivity, color = recovery.type)) + 
+  geom_line() + 
+  geom_abline(linetype = "dashed") + 
+  labs(title = "GL261 Recovery of Human GBM Essential Genes", subtitle = paste0("GBM = ", gl261.auc.val, "; Other = ", gl261.auc.val.other, "; Glioma = ", gl261.auc.val.glioma, "; GBM-specific = ", gl261.auc.val.gs)) + 
+  theme_miko(grid = F, legend = T)
+
+plt.ct2a.pr <- df.roc.ct2a %>%
+  ggplot(aes(x = recall, y = precision, color = recovery.type)) + 
+  geom_line() + 
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  labs(title = "CT2A Recovery of Human GBM Essential Genes", subtitle = paste0("GBM = ", ct2a.auprc.val, "; Other = ", ct2a.auprc.val.other, "; Glioma = ", ct2a.auprc.val.glioma, "; GBM-specific = ", ct2a.auprc.val.gs)) + 
+  ylim(c(0,1)) + 
+  theme_miko(grid = F, legend = T)
+
+plt.gl261.pr <- df.roc.gl261 %>%
+  ggplot(aes(x = recall, y = precision, color = recovery.type)) + 
+  geom_line() + 
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  labs(title = "GL261 Recovery of Human GBM Essential Genes", subtitle = paste0("GBM = ", gl261.auprc.val, "; Other = ", gl261.auprc.val.other, "; Glioma = ", gl261.auprc.val.glioma, "; GBM-specific = ", gl261.auprc.val.gs)) + 
+  ylim(c(0,1)) + 
+  theme_miko(grid = F, legend = T)
+
+plt.ct2a.roc
+plt.gl261.roc
+plt.ct2a.pr
+plt.gl261.pr
+# savePDF("CT2A_essentials_ROC_210722.pdf", plt.ct2a.roc, fig.width = 7, fig.height = 5)
+
+```
+

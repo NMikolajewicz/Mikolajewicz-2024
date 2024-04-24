@@ -1,0 +1,2242 @@
+---
+  title: "GBM Fig2 PART2"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output: 
+  flexdashboard::flex_dashboard:
+  orientation: rows
+vertical_layout: fill
+editor_options: 
+  chunk_output_type: inline
+knit: (function(inputFile, encoding) {
+  rmarkdown::render(input = inputFile,
+                    encoding = encoding,
+                    output_file = if (exists("user")){paste0(
+                      xfun::sans_ext(inputFile), '_',user, "_", format(Sys.Date(), "%d%m%y"), '.html'
+                    )} else {paste0(xfun::sans_ext(inputFile), '_',"Guest", "_", format(Sys.Date(), "%d%m%y"), '.html')},
+                    output_dir = if (exists("data.path")) paste0(data.path, "/HTML_Reports") else NULL
+  )
+})
+---
+  
+  
+  
+```{r load libraries, include=FALSE}
+
+# clear global enviroment                          
+rm(list = setdiff(ls(), c("data.path", "user")))
+invisible({gc()})
+
+# initiate timer
+start.time <- proc.time()
+
+# load packages
+packages2load <- c("scMiko", "Seurat", "plyr",  "dplyr", "tidyr", "reshape2", 
+                   "DT", "flexdashboard", "ggpmisc", "future", "foreach", "doParallel",
+                   "AnnotationDbi", "org.Mm.eg.db", "org.Hs.eg.db", "fgsea", "ggplot2", "reactome.db",
+                   "schex", "RColorBrewer", "cowplot")
+
+# load packages
+invisible(lapply(packages2load, library, character.only = TRUE))
+
+```
+
+```{r parameter specification}
+
+
+
+# analysis parameters
+cluster.resolution <- 1
+subset.df <- "no.subset"
+which.species <- "Mm" # Option: Mm or Hs
+
+# downsample factor
+subsample_factor <- 0.75
+
+ct2a.color <- brewer.pal(n = 3, "BrBG")[3]
+gl261.color <- brewer.pal(n = 3, "BrBG")[1]
+
+
+```
+
+```{r load data}
+
+load("fig2_data_160221.RData")
+so.gl261 <- fig2.list$so.gl261
+so.ct2a <- fig2.list$so.ct2a
+so.invitro <- fig2.list$so.invitro
+gl261.genes <- fig2.list$gl261.genes
+ct2a.genes <- fig2.list$ct2a.genes
+
+rm(fig2.list); gc()
+
+```
+
+```{r integrate across samples}
+
+do.rerun <- F
+
+so.immune2 <- readRDS(paste0(data.path, "Preprocessed_Datasets/so_immune2_invivo_integrated_170421.rds"))
+so.immune2 <- setResolution(so.immune2, resolution = 2, assay = "integrated")
+so.immune2 <- so.immune2[ , so.immune2@meta.data$seurat_clusters %in% 11]
+
+if (do.rerun){
+  so.list <- list(
+    ct2a = so.ct2a,
+    gl261 = so.gl261
+  )
+  
+  sct.presplit <- T
+  
+  if (!sct.presplit){
+    # split data
+    so.gl261.list <- SplitObject(so.gl261, split.by = "Barcode")
+    so.gl261.list$in_vitro_gl261 <- so.invitro[ , so.invitro@meta.data[["tclass"]] %in% "GL261"]
+    so.ct2a.list <- SplitObject(so.ct2a, split.by = "Barcode")
+    so.ct2a.list$in_vitro_ct2a <- so.invitro[ , so.invitro@meta.data[["tclass"]] %in% "CT2A"]
+    so.cg.list <- c(so.ct2a.list, so.gl261.list)
+    
+    # renormalize
+    so.gl261.list <- pbapply::pblapply(X = so.gl261.list, FUN = SCTransform, method = "glmGamPoi", verbose = T,
+                                       vars.to.regress = "percent.mt", variable.features.rv.th = 1.3)
+    so.ct2a.list <- pbapply::pblapply(X = so.ct2a.list, FUN = SCTransform, method = "glmGamPoi", verbose = T,
+                                      vars.to.regress = "percent.mt", variable.features.rv.th = 1.3)
+    so.cg.list <- pbapply::pblapply(X = so.cg.list, FUN = SCTransform, method = "glmGamPoi", verbose = T,
+                                    vars.to.regress = "percent.mt", variable.features.rv.th = 1.3)    
+  } else {
+
+    so.immune2@assays$RNA <- so.immune2@assays$SCT
+    
+    so.gl261.all <- merge(so.gl261, y = so.immune2[ , grepl("GL261", so.immune2@meta.data[["Barcode"]])]) 
+    so.ct2a.all <- merge(so.ct2a, y = so.immune2[ , grepl("CT2A", so.immune2@meta.data[["Barcode"]])])
+    so.all <- merge(so.gl261, y = c(so.ct2a, so.immune2)) #, so.invitro
+    
+    so.gl261.all <- SCTransform(so.gl261.all, method = "glmGamPoi", verbose = T,assay = "RNA", 
+                                vars.to.regress = "percent.mt", variable.features.rv.th = 1.3)
+    so.ct2a.all <- SCTransform(so.ct2a.all, method = "glmGamPoi", verbose = T,assay = "RNA", 
+                               vars.to.regress = "percent.mt", variable.features.rv.th = 1.3)
+    so.all <- SCTransform(so.all, method = "glmGamPoi", verbose = T,assay = "RNA", 
+                          vars.to.regress = "percent.mt", variable.features.rv.th = 1.3)
+    
+    so.gl261.list <- SplitObject(so.gl261.all, split.by = "Barcode")
+    so.ct2a.list <- SplitObject(so.ct2a.all, split.by = "Barcode")
+    so.cg.list <- c(so.ct2a.list, so.gl261.list)
+  }
+
+  g.ncell <- unlist(lapply(so.gl261.list, ncol))
+  c.ncell <- unlist(lapply(so.ct2a.list, ncol))
+  cg.ncell <- unlist(lapply(so.cg.list, ncol))
+  
+  so.gl261.list <- so.gl261.list[g.ncell > 40]
+  so.ct2a.list <- so.ct2a.list[c.ncell > 40]
+  so.cg.list <- so.cg.list[c.ncell > 40]
+
+  # select features
+  gl261.features <- SelectIntegrationFeatures(object.list = so.gl261.list, nfeatures = 3000)
+  so.gl261.list <- PrepSCTIntegration(object.list = so.gl261.list, anchor.features = gl261.features)
+  ct2a.features <- SelectIntegrationFeatures(object.list = so.ct2a.list, nfeatures = 3000)
+  so.ct2a.list <- PrepSCTIntegration(object.list = so.ct2a.list, anchor.features = ct2a.features)
+  cg.features <- SelectIntegrationFeatures(object.list = so.cg.list, nfeatures = 3000)
+  so.cg.list <- PrepSCTIntegration(object.list = so.cg.list, anchor.features = cg.features)
+  
+  # run PCA
+  so.gl261.list <- pbapply::pblapply(X = so.gl261.list, FUN = RunPCA, features = gl261.features, verbose = T)
+  so.ct2a.list <- pbapply::pblapply(X = so.ct2a.list, FUN = RunPCA,  features = ct2a.features,verbose = T)
+  so.cg.list <- pbapply::pblapply(X = so.cg.list, FUN = RunPCA,  features = cg.features,verbose = T)
+  
+  # find integration anchors
+  gl261.anchors <- FindIntegrationAnchors(object.list = so.gl261.list, normalization.method = "SCT", k.filter = 70,
+                                          anchor.features = gl261.features, dims = 1:40, reduction = "rpca", k.anchor = 20)
+  ct2a.anchors <- FindIntegrationAnchors(object.list = so.ct2a.list, normalization.method = "SCT", k.filter = 70,
+                                         anchor.features = ct2a.features, dims = 1:40, reduction = "rpca", k.anchor = 20)
+  cg.anchors <- FindIntegrationAnchors(object.list = so.cg.list, normalization.method = "SCT", k.filter = 70,
+                                       anchor.features = cg.features, dims = 1:40, reduction = "rpca", k.anchor = 5)
+
+  # integrate data
+  so.gl261.int <- IntegrateData(anchorset = gl261.anchors, normalization.method = "SCT", dims = 1:40, k.weight = 50)
+  so.ct2a.int <- IntegrateData(anchorset = ct2a.anchors, normalization.method = "SCT", dims = 1:40, k.weight = 50)
+  so.cg.int <- IntegrateData(anchorset = cg.anchors, normalization.method = "SCT", dims = 1:40, k.weight = 50)
+  
+  # dimensional reduction
+  var.threshold <- 0.9
+  so.gl261.int <- RunPCA(so.gl261.int, verbose = FALSE)
+  df.gl261.var <- propVarPCA(so.gl261.int)
+  gl261.n.dim <- df.gl261.var$pc.id [min(which(df.gl261.var$pc.cum_sum > var.threshold))]
+  so.gl261.int <- RunUMAP(so.gl261.int, reduction = "pca", dims = 1:gl261.n.dim, return.model = T)
+  so.ct2a.int <- RunPCA(so.ct2a.int, verbose = FALSE)
+  df.ct2a.var <- propVarPCA(so.ct2a.int)
+  ct2a.n.dim <- df.ct2a.var$pc.id [min(which(df.ct2a.var$pc.cum_sum > var.threshold))]
+  so.ct2a.int <- RunUMAP(so.ct2a.int, reduction = "pca", dims = 1:ct2a.n.dim, return.model = T)
+  so.cg.int <- RunPCA(so.cg.int, verbose = FALSE)
+  df.cg.var <- propVarPCA(so.cg.int)
+  cg.n.dim <- df.cg.var$pc.id [min(which(df.cg.var$pc.cum_sum > var.threshold))]
+  so.cg.int <- RunUMAP(so.cg.int, reduction = "pca", dims = 1:cg.n.dim, return.model = T)
+  
+  # cluster data
+  so.gl261.int <- FindNeighbors(so.gl261.int, dims = 1:gl261.n.dim, verbose = T)
+  so.ct2a.int <- FindNeighbors(so.ct2a.int, dims = 1:ct2a.n.dim, verbose = T)
+  so.gl261.int <- FindClusters(so.gl261.int, verbose = T)
+  so.ct2a.int <- FindClusters(so.ct2a.int, verbose = T)
+  
+  so.cg.int <- FindNeighbors(so.cg.int, dims = 1:cg.n.dim, verbose = T)
+  so.cg.int <- FindClusters(so.cg.int, verbose = T)
+  
+  # visualize integrated data
+  cluster.UMAP(so.ct2a.int)
+  cluster.UMAP(so.gl261.int)
+  cluster.UMAP(so.cg.int)
+  
+  so.cg.int@meta.data$gbm.model <- NA
+  so.cg.int@meta.data$gbm.model[grepl("CT2A", so.cg.int@meta.data$Barcode)] <- "CT2A"
+  so.cg.int@meta.data$gbm.model[grepl("GL261", so.cg.int@meta.data$Barcode)] <- "GL261"
+  cluster.UMAP(so.cg.int, "gbm.model")
+  
+  so.ct2a <- so.ct2a.int
+  so.gl261 <- so.gl261.int
+  saveRDS(so.ct2a, paste0(data.path, "Preprocessed_Datasets/invivo_invitro_CT2A_sampleIntegrated_180421.rds"))
+  saveRDS(so.gl261, paste0(data.path, "Preprocessed_Datasets/invivo_invitro_GL261_sampleIntegrated_180421.rds"))
+  saveRDS(so.cg.int, paste0(data.path, "Preprocessed_Datasets/invivo_GL261_CT2A_sampleIntegrated_180421.rds"))
+  
+  rm(so.ct2a.int); rm(so.gl261.int); gc()
+  
+} else {
+  so.ct2a <-  readRDS(paste0(data.path, "Preprocessed_Datasets/invivo_invitro_CT2A_sampleIntegrated_180421.rds"))
+  so.gl261 <-  readRDS(paste0(data.path, "Preprocessed_Datasets/invivo_invitro_GL261_sampleIntegrated_180421.rds"))
+}
+
+DefaultAssay(so.ct2a) <- "SCT"
+DefaultAssay(so.gl261) <- "SCT"
+
+```
+
+```{r import human data}
+
+# PR pairs #####################################################################
+# human tumor population was computed in GBM_Fig2_part3_immune.rds analysis file
+so.hs.tumor <-  readRDS(paste0(data.path, "Preprocessed_Datasets/so_tumor_PR_invivo_integrated_260521.rds"))
+DefaultAssay(so.hs.tumor) <- "SCT"
+cluster.UMAP(so.hs.tumor)
+
+# Richards 2019 ################################################################
+load(paste0(data.path, "Preprocessed_Datasets/R388_M01_NM2_Richards_2021_GSC_080221.Rdata"));
+so.richards <- prepSeurat(so); rm(so)
+set.seed(1023)
+so.richards <- downsampleSeurat(so.richards, 1/3)
+
+# Neftel 2019 ##################################################################
+# load(paste0(data.path, "Preprocessed_Datasets/Module1_Neftel_10x_160120.Rdata"));
+load(paste0(data.path, "Preprocessed_Datasets/R502_M01_NM2_Neftel_2019_10x_lenient_040621.Rdata"))
+so.neftel <- prepSeurat(so); rm(so)
+
+# MRD paper ####################################################################
+# load(paste0(data.path, "Preprocessed_Datasets/Module1_M16_M27_UHN_240620.Rdata"));
+load(paste0(data.path, "Preprocessed_Datasets/R488_M01_NM2_GBM_UHN_stringent_240521.Rdata"));
+so.mrd <- prepSeurat(so); rm(so)
+
+# DefaultAssay(so.cg.int) <-
+DefaultAssay(so.ct2a) <- DefaultAssay(so.gl261) <-  DefaultAssay(so.hs.tumor) <- DefaultAssay(so.neftel) <- DefaultAssay(so.mrd) <- DefaultAssay(so.richards) <- "SCT"
+
+```
+
+```{r Abdelfattah 2022 and Yu 2018}
+
+# YU 2018 ######################################################################
+so.yu <- readRDS("seurat_object_Yu2022_processed_080722.rds")
+
+cell.list <- list(
+  lymphoid = c(5,15),
+  oligodendrocyte = c(4,9,11),
+  tumor_cilia = 10,
+  myeloid =  c(14, 1, 7, 16),
+  glioma = c(8, 12, 2, 13, 6, 0),
+  unresolved = 3
+)
+
+so.yu <- recodeBarcode(object = so.yu, old.field.name = "seurat_clusters", new.field.name = "celltype",barcode.recode = cell.list, exact.match = T)
+so.yu.tumor <- so.yu[ ,so.yu@meta.data$celltype %in% "glioma" & 
+                        so.yu@meta.data$Sample.type %in% "Tumoral" &
+                        so.yu@meta.data$WHO.Grade %in% c("II", "IV")]
+
+so.yu <- so.yu.tumor
+
+# ABDELFATTAH 2022 ############################################################
+load(paste0(data.path, "Preprocessed_Datasets/R733_M02_HH_PR_GBM_Abdelfattah_2022_Scanorama_integrated_380322.Rdata"))
+so.abdel <- so;
+rm(so); invisible({gc()})
+
+so.abdel@assays$RNA <- NULL
+
+DefaultAssay(so.abdel) <- "integrated"
+so.abdel <- FindClusters(so.abdel, resolution = 0.1)
+so.abdel <- FindClusters(so.abdel, resolution = 1.5)
+DefaultAssay(so.abdel) <- "SCT"
+
+# res 0.1
+abdel.cell.label.low <- list(
+  T_cell = c(3,8),
+  Tumor = c(0,4, 11, 5, 10, 12),
+  OPC = 7,
+  Myeloid = c(1,2,6),
+  Plasma_cell = 13
+)
+
+# res = 1.5
+abdel.cell.label.high <- list(
+  Dendritic_cell = 36,
+  Neutrophil = 37,
+  NK_cell = 45,
+  Endothelial = 41,
+  Pericyte = c(46, 56),
+  B_cell = 54
+)
+
+so.abdel <- recodeBarcode(object = so.abdel, barcode.recode = abdel.cell.label.low, 
+                          old.field.name = "integrated_snn_res.0.1", new.field.name = "class_1", exact.match = T)
+so.abdel <- recodeBarcode(object = so.abdel, barcode.recode = abdel.cell.label.high, 
+                          old.field.name = "integrated_snn_res.1.5", new.field.name = "class_2", exact.match = T)
+
+so.abdel@meta.data$class <- NA
+
+
+cluster.UMAP(so.abdel, "class_1")
+cluster.UMAP(so.abdel, "class_2")
+
+so.abdel <- so.abdel[ ,so.abdel@meta.data$class_1 %in% "Tumor"]
+gc()
+
+# Wang 2022 ####################################################################
+
+load(paste0(data.path, "Preprocessed_Datasets/R744_M02_NM2_SET3_CT2A_regional_reboot_rPCA_integration_240322.Rdata"))
+so.wang <- so;
+rm(so); gc();
+
+# annotate malignant vs. non-malignant
+# read.delim()
+df.wang.malig.meta <- read.delim2("C:/Users/n mikolajewicz/Dropbox/PDF Projects - JM/Data/scRNA-seq/01_sci-RNA-seq3_Hong_Kevin_Jason/NM_HH/PR_GBM/Papers/Wang2022_NatureCancer_data/GSE174554_Tumor_normal_metadata.txt/GSE174554_Tumor_normal_metadata.txt", header = T, sep = " ") 
+colnames(df.wang.malig.meta) <- c("Barcode", "Type")
+b2t <- df.wang.malig.meta$Type
+names(b2t) <- df.wang.malig.meta$Barcode
+
+so.wang@meta.data$id.clean <- stringr::str_remove(string = colnames(so.wang), pattern = "S[0-9]*_")
+so.wang@meta.data$id.clean <- stringr::str_remove(string = so.wang@meta.data$id.clean, pattern = "-[0-9]*_[0-9]*")
+so.wang@meta.data$id.clean <- paste0(so.wang@meta.data$Barcode, "_",  so.wang@meta.data$id.clean)
+so.wang@meta.data$id.clean <- stringr::str_remove(string = so.wang@meta.data$id.clean, pattern = "[A-Za-z0-9]*_")
+so.wang@meta.data$id.clean <- stringr::str_remove(string = so.wang@meta.data$id.clean, pattern = "_batch2")
+so.wang@meta.data$id.clean <- stringr::str_remove(string = so.wang@meta.data$id.clean, pattern = "v2")
+so.wang@meta.data$type <- b2t[so.wang@meta.data$id.clean]
+so.wang <- so.wang[ ,so.wang@meta.data$type %in% "Tumor"] 
+gc()
+
+```
+
+
+```{r filter out immune cells}
+
+so.neftel <- clusterFilter(so.neftel, omit=c(22, 27))
+cluster.UMAP(so.neftel)
+gc()
+
+```
+
+```{r highlight samples, fig.width=25, fig.height=5}
+
+
+highlightSamples <- function(object, group.by = "Barcode", sample.name = ""){
+  u.bc <- unique(object$Barcode)
+  
+  df.umap <- getUMAP(object, meta.features = group.by)[["df.umap"]]
+  
+  plt.umap.list <- list()
+  for (i in 1:length(u.bc)){
+    
+    df.umap$is.in <- df.umap$Barcode %in% u.bc[i]
+    
+    plt.umap.list[[u.bc[i]]] <- df.umap %>% 
+      dplyr::arrange(is.in) %>%
+      ggplot(aes(x = x, y = y, color = is.in)) + 
+      geom_point(size = autoPointSize(nrow(df.umap))) + 
+      scale_color_manual(values = c("TRUE" = "tomato", "FALSE" = "grey")) + 
+      theme_miko(legend = F) + 
+      labs(x = "UMAP 1", y = "UMAP 2", title = sample.name, subtitle = paste0(u.bc[i], "(", sum(df.umap$is.in) , "/", nrow(df.umap), ")"))
+    
+  }
+  
+  return(plt.umap.list)
+}
+
+
+gl261.highlight <- highlightSamples(so.gl261, sample.name = "GL261")
+ct2a.highlight <- highlightSamples(so.ct2a, sample.name = "CT2A")
+
+cowplot::plot_grid(plotlist = gl261.highlight, nrow = 1)
+cowplot::plot_grid(plotlist = ct2a.highlight, nrow = 1)
+
+so.gl261$is.invitro <-1*grepl("invitro", so.gl261$Barcode)  
+so.ct2a$is.invitro <-1*grepl("invitro", so.ct2a$Barcode) 
+
+```
+
+
+ 
+
+
+```{r prep all heterogeniety genesets}
+
+message("Preparing signature gene sets for scoring...")
+data(geneSets)
+
+ screen.list <- list()
+
+cancer.df <- geneSets[["CancerSEA_Hs"]]
+cancer.list <- wideDF2namedList(cancer.df)
+
+verhaak.df <- geneSets[["Verhaak_CancerCell_2010"]]
+verhaak.list <- wideDF2namedList(verhaak.df)
+
+gsc.df <- geneSets[["Richards_NatureCancer_2021_sc"]]
+gsc.list <- wideDF2namedList(gsc.df)
+
+neftel.df <- geneSets[["GBM_Hs_Neftel2019"]]
+neftel.list <- wideDF2namedList(neftel.df)
+neftel.list <- neftel.list[!grepl("G", names(neftel.list))]
+
+df.nmf <- read.csv("C:/Users/n mikolajewicz/Dropbox/PDF Projects - JM/Data/scRNA-seq/01_sci-RNA-seq3_Hong_Kevin_Jason/NM_HH/GBM/Reboot/Results/Reboot6_tumor_comparisons_SET1_v1_Rmd/NMF_genes_010722.csv")
+df.nmf <- df.nmf %>% dplyr::select(-c("X"))
+miko.list <- wideDF2namedList(df.nmf)
+miko.list <- lapply(miko.list, toupper)
+ti.ag.set <- list()
+
+verhaak.list <- lapply(verhaak.list, firstup)
+gsc.list <- lapply(gsc.list, firstup)
+neftel.list <- lapply(neftel.list, firstup)
+miko.list <- lapply(miko.list, firstup)
+cancer.list <- lapply(cancer.list, firstup)
+
+data(geneSets)
+species <- "Mm"
+atf.all <- firstup(c(unlist(geneSets[["AnimalTFDB"]][ ,"Mm"]), unlist(geneSets[["AnimalTFDB"]][ ,"Hs"])))
+trust.all <- firstup(c(colnames(geneSets[[paste0("TRRUSTv2_", "Mm")]]), colnames(geneSets[[paste0("TRRUSTv2_", "Hs")]])))
+tf.all <- firstup(unique(c(atf.all, trust.all)))
+
+neftel.list_notf <- lapply(neftel.list, function(x) x[!(x %in% tf.all)])
+names(neftel.list_notf) <- paste0(names(neftel.list_notf), "_notf")
+gsc.list_notf <- lapply(gsc.list, function(x) x[!(x %in% tf.all)])
+names(gsc.list_notf) <- paste0(names(gsc.list_notf), "_notf")
+cancer.list_notf <- lapply(cancer.list, function(x) x[!(x %in% tf.all)])
+names(cancer.list_notf) <- paste0(names(cancer.list_notf), "_notf")
+verhaak.list_notf <- lapply(verhaak.list, function(x) x[!(x %in% tf.all)])
+names(verhaak.list_notf) <- paste0(names(verhaak.list_notf), "_notf")
+miko.list_notf <- lapply(miko.list, function(x) x[!(x %in% tf.all)])
+names(miko.list_notf) <- paste0(names(miko.list_notf), "_notf")  
+
+
+
+master.set <- c(neftel.list, neftel.list_notf, 
+                gsc.list, gsc.list_notf, 
+                cancer.list, cancer.list_notf,
+                verhaak.list, verhaak.list_notf,
+                miko.list, miko.list_notf
+)
+
+master.set.orig <- master.set
+
+library(scales)
+
+  so.gl261.clean <- cleanCluster(clusterFilter(so.gl261, omit = c("15", "16")))
+  so.ct2a.clean <- cleanCluster(clusterFilter(so.ct2a, omit = c("15")))
+
+```
+
+```{r, fig.height=6, fig.width=7}
+
+compareGetsets <- function(nmf.set, master.set, species, sample.name){
+  all.gene <- c(nmf.set, master.set)
+  if (species == "Mm"){
+    all.gene <- lapply(all.gene, firstup)
+  } else if (species == "Hs"){
+    all.gene <- lapply(all.gene, toupper)
+  }
+  miko_heatmap(jaccardSimilarityMatrix(all.gene)[!grepl("NMF|notf", names(all.gene)), 
+                                                 grepl("NMF", names(all.gene))],scale = "column", scale.lim = 2) +  
+    labs(title = sample.name)
+  
+}
+
+
+```
+
+
+```{r, fig.width=12, fig.height=4, warning = FALSE, message = FALSE}
+
+message("Scoring genesets...")
+
+DefaultAssay(so.ct2a) <- DefaultAssay(so.gl261) <-   DefaultAssay(so.hs.tumor) <- DefaultAssay(so.neftel) <- DefaultAssay(so.mrd) <- DefaultAssay(so.richards) <- DefaultAssay(so.yu) <- DefaultAssay(so.abdel) <- DefaultAssay(so.wang) <-"SCT"
+
+ct2a.ms <- runMS(object = so.ct2a, genelist = master.set, winsorize.quantiles = c(0.01, 0.99), search = F, scale = F)
+gl261.ms <- runMS(object = so.gl261, genelist = master.set, winsorize.quantiles = c(0.01, 0.99), search = F, scale = F)
+pr.ms <- runMS(object = so.hs.tumor, genelist = lapply(master.set, toupper), winsorize.quantiles = c(0.01, 0.99), search = F, scale = F)
+neftel.ms <- runMS(object = so.neftel, genelist = lapply(master.set, toupper), winsorize.quantiles = c(0.01, 0.99), search = F, scale = F)
+mrd.ms <- runMS(object = so.mrd, genelist = lapply(master.set, toupper), winsorize.quantiles = c(0.01, 0.99), search = F, scale = F)
+richards.ms <- runMS(object = so.richards, genelist = lapply(master.set, toupper), winsorize.quantiles = c(0.01, 0.99), search = F, scale = F)
+
+yu.ms <- runMS(object = so.yu, genelist = lapply(master.set, toupper), 
+               winsorize.quantiles = c(0.01, 0.99), search = F, scale = F)
+abdel.ms <- runMS(object = so.abdel, genelist = lapply(master.set, toupper),
+                  winsorize.quantiles = c(0.01, 0.99), search = F, scale = F)
+wang.ms <- runMS(object = so.wang, genelist = lapply(master.set, toupper), 
+                 winsorize.quantiles = c(0.01, 0.99), search = F, scale = F)
+
+```
+
+
+
+```{r consolidate scores, fig.width=15, fig.height=5}
+
+consolidateScores <- function(ms.result, omit.tf = F){
+  
+  if (!omit.tf){
+    df.score <- data.frame(
+      Developmental_Richards2021 = ms.result$data$Developmental,
+      Injury_Response_Richards2021 = ms.result$data$Injury_Response,
+      Classical_Verhaak2010 = ms.result$data$Classical,
+      Proneural_Verhaak2010 = ms.result$data$Proneural,
+      Neural_Verhaak2010 = ms.result$data$Neural,
+      Mesenchymal_Verhaak2010 = ms.result$data$Mesenchymal,
+      MES1_Neftel2019 = ms.result$data$MES1,
+      MES2_Neftel2019 = ms.result$data$MES2,
+      NPC1_Neftel2019 = ms.result$data$NPC1,
+      NPC2_Neftel2019 = ms.result$data$NPC2,
+      AC_Neftel2019 = ms.result$data$AC,
+      OPC_Neftel2019 = ms.result$data$OPC,
+      Angiogenesis_CancerSEA = ms.result$data$Angiogenesis,
+      Apoptosis_CancerSEA = ms.result$data$Apoptosis,
+      CellCycle_CancerSEA = ms.result$data$CellCycle,
+      Differentiation_CancerSEA = ms.result$data$Differentiation,
+      DNAdamage_CancerSEA = ms.result$data$DNAdamage,
+      DNArepair_CancerSEA = ms.result$data$DNArepair,
+      EMT_CancerSEA = ms.result$data$EMT,
+      Hypoxia_CancerSEA = ms.result$data$Hypoxia,
+      Inflammation_CancerSEA = ms.result$data$Inflammation,
+      Invasion_CancerSEA = ms.result$data$Invasion,
+      Proliferation_CancerSEA = ms.result$data$Proliferation,
+      Quiescence_CancerSEA = ms.result$data$Quiescence,
+      Stemness_CancerSEA = ms.result$data$Stemness,
+      G1 = ms.result$data$G1,
+      G2 = ms.result$data$G2,
+      G3 = ms.result$data$G3,
+      G4 = ms.result$data$G4,
+      G5 = ms.result$data$G5,
+      G6 = ms.result$data$G6,
+      G7 = ms.result$data$G7,
+      G8 = ms.result$data$G8
+    )
+  } else {
+    df.score <- data.frame(
+      Developmental_Richards2021 = ms.result$data$Developmental_notf,
+      Injury_Response_Richards2021 = ms.result$data$Injury_Response_notf,
+      Classical_Verhaak2010 = ms.result$data$Classical_notf,
+      Proneural_Verhaak2010 = ms.result$data$Proneural_notf,
+      Neural_Verhaak2010 = ms.result$data$Neural_notf,
+      Mesenchymal_Verhaak2010 = ms.result$data$Mesenchymal_notf,
+      MES1_Neftel2019 = ms.result$data$MES1_notf,
+      MES2_Neftel2019 = ms.result$data$MES2_notf,
+      NPC1_Neftel2019 = ms.result$data$NPC1_notf,
+      NPC2_Neftel2019 = ms.result$data$NPC2_notf,
+      AC_Neftel2019 = ms.result$data$AC_notf,
+      OPC_Neftel2019 = ms.result$data$OPC_notf,
+      Angiogenesis_CancerSEA = ms.result$data$Angiogenesis_notf,
+      Apoptosis_CancerSEA = ms.result$data$Apoptosis_notf,
+      CellCycle_CancerSEA = ms.result$data$CellCycle_notf,
+      Differentiation_CancerSEA = ms.result$data$Differentiation_notf,
+      DNAdamage_CancerSEA = ms.result$data$DNAdamage_notf,
+      DNArepair_CancerSEA = ms.result$data$DNArepair_notf,
+      EMT_CancerSEA = ms.result$data$EMT_notf,
+      Hypoxia_CancerSEA = ms.result$data$Hypoxia_notf,
+      Inflammation_CancerSEA = ms.result$data$Inflammation_notf,
+      Invasion_CancerSEA = ms.result$data$Invasion_notf,
+      Proliferation_CancerSEA = ms.result$data$Proliferation_notf,
+      Quiescence_CancerSEA = ms.result$data$Quiescence_notf,
+      Stemness_CancerSEA = ms.result$data$Stemness_notf,
+      G1 = ms.result$data$G1_notf,
+      G2 = ms.result$data$G2_notf,
+      G3 = ms.result$data$G3_notf,
+      G4 = ms.result$data$G4_notf,
+      G5 = ms.result$data$G5_notf,
+      G6 = ms.result$data$G6_notf,
+      G7 = ms.result$data$G7_notf,
+      G8 = ms.result$data$G8_notf
+    ) 
+    
+  }
+  
+  rownames(df.score) <- ms.result[["data"]][["cells"]]
+  
+  return(df.score)
+}
+
+
+df.ct2a.cor <- consolidateScores(ct2a.ms, omit.tf = F)
+df.gl261.cor <- consolidateScores(gl261.ms, omit.tf = F)
+df.pr.cor <- consolidateScores(pr.ms, omit.tf = F)
+df.neftel.cor <- consolidateScores(neftel.ms, omit.tf = F)
+df.mrd.cor <- consolidateScores(mrd.ms, omit.tf = F)
+df.richards.cor <- consolidateScores(richards.ms, omit.tf = F)
+df.yu.cor <- consolidateScores(yu.ms, omit.tf = F)
+df.abdel.cor <- consolidateScores(abdel.ms, omit.tf = F)
+df.wang.cor <- consolidateScores(wang.ms, omit.tf = F)
+
+
+df.ct2a_notf <- consolidateScores(ct2a.ms,  omit.tf = T)
+df.gl261_notf <- consolidateScores(gl261.ms,  omit.tf = T)
+df.pr_notf <- consolidateScores(pr.ms,  omit.tf = T)
+df.neftel_notf <- consolidateScores(neftel.ms,  omit.tf = T)
+df.mrd_notf <- consolidateScores(mrd.ms,  omit.tf = T)
+df.richards_notf <- consolidateScores(richards.ms,  omit.tf = T)
+df.yu_notf <- consolidateScores(yu.ms, omit.tf = T)
+df.abdel_notf <- consolidateScores(abdel.ms, omit.tf = T)
+df.wang_notf <- consolidateScores(wang.ms, omit.tf = T)
+
+```
+
+```{r signature correlations, fig.width=20, fig.height=15}
+
+
+# compute correlations
+ct2a.cor.mat <- cor(df.ct2a.cor, method = "spearman") # ct2a
+gl261.cor.mat <- cor(df.gl261.cor, method = "spearman") # gl261
+pr.cor.mat <- cor(df.pr.cor, method = "spearman") # pr
+neftel.cor.mat <- cor(df.neftel.cor, method = "spearman") # neftel
+mrd.cor.mat <- cor(df.mrd.cor, method = "spearman") # mrd
+richards.cor.mat <- cor(df.richards.cor, method = "spearman") # richards
+yu.cor.mat <- cor(df.yu.cor, method = "spearman") # mrd
+abdel.cor.mat <- cor(df.abdel.cor, method = "spearman") # richards
+wang.cor.mat <- cor(df.wang.cor, method = "spearman") # richards
+
+# generate cor heatmap
+my.breaks <- seq(-1, 1, by = 2/100)
+n.cut <- 4
+ct2a.hm <- ggplotify::as.ggplot(pheatmap::pheatmap(ct2a.cor.mat,show_colnames = F, border_color = NA, cutree_cols = n.cut,cutree_rows = n.cut,
+                                                   breaks = my.breaks,fontsize_row =6, silent = T,
+                                                   color = colorRampPalette(rev(brewer.pal(n = 11, name = "RdBu")))(100)))+ 
+  labs(title = "Signature Similarities", subtitle = "CT2A") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  theme(plot.subtitle = element_text(hjust = 0.5))
+
+gl261.hm <- ggplotify::as.ggplot(pheatmap::pheatmap(gl261.cor.mat,show_colnames = F, border_color = NA, cutree_cols = n.cut,cutree_rows = n.cut,
+                                                    breaks = my.breaks,fontsize_row =6, silent = T,
+                                                    color = colorRampPalette(rev(brewer.pal(n = 11, name = "RdBu")))(100)))+ 
+  labs(title = "Signature Similarities", subtitle = "GL261") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  theme(plot.subtitle = element_text(hjust = 0.5))
+
+pr.hm <- ggplotify::as.ggplot(pheatmap::pheatmap(pr.cor.mat,show_colnames = F, border_color = NA, cutree_cols = n.cut,cutree_rows = n.cut,
+                                                 breaks = my.breaks,fontsize_row =6, silent = T,
+                                                 color = colorRampPalette(rev(brewer.pal(n = 11, name = "RdBu")))(100)))+ 
+  labs(title = "Signature Similarities", subtitle = "Primary-Recurrent Hs") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  theme(plot.subtitle = element_text(hjust = 0.5))
+
+neftel.hm <- ggplotify::as.ggplot(pheatmap::pheatmap(neftel.cor.mat,show_colnames = F, border_color = NA, cutree_cols = n.cut,cutree_rows = n.cut,
+                                                     breaks = my.breaks,fontsize_row =6, silent = T,
+                                                     color = colorRampPalette(rev(brewer.pal(n = 11, name = "RdBu")))(100)))+ 
+  labs(title = "Signature Similarities", subtitle = "Neftel 2019") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  theme(plot.subtitle = element_text(hjust = 0.5))
+
+richards.hm <- ggplotify::as.ggplot(pheatmap::pheatmap(richards.cor.mat,show_colnames = F, border_color = NA, cutree_cols = n.cut,cutree_rows = n.cut,
+                                                       breaks = my.breaks,fontsize_row =6, silent = T,
+                                                       color = colorRampPalette(rev(brewer.pal(n = 11, name = "RdBu")))(100)))+ 
+  labs(title = "Signature Similarities", subtitle = "Richards 2021") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  theme(plot.subtitle = element_text(hjust = 0.5))
+
+mrd.hm <- ggplotify::as.ggplot(pheatmap::pheatmap(mrd.cor.mat,show_colnames = F, border_color = NA, cutree_cols = n.cut,cutree_rows = n.cut,
+                                                  breaks = my.breaks,fontsize_row =6, silent = T,
+                                                  color = colorRampPalette(rev(brewer.pal(n = 11, name = "RdBu")))(100)))+ 
+  labs(title = "Signature Similarities", subtitle = "MRD 2021") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  theme(plot.subtitle = element_text(hjust = 0.5))
+
+yu.hm <- ggplotify::as.ggplot(pheatmap::pheatmap(yu.cor.mat,show_colnames = F, border_color = NA, cutree_cols = n.cut,cutree_rows = n.cut,
+                                                 breaks = my.breaks,fontsize_row =6, silent = T,
+                                                 color = colorRampPalette(rev(brewer.pal(n = 11, name = "RdBu")))(100)))+ 
+  labs(title = "Signature Similarities", subtitle = "Yu 2018") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  theme(plot.subtitle = element_text(hjust = 0.5))
+
+abdel.hm <- ggplotify::as.ggplot(pheatmap::pheatmap(abdel.cor.mat,show_colnames = F, border_color = NA, cutree_cols = n.cut,cutree_rows = n.cut,
+                                                    breaks = my.breaks,fontsize_row =6, silent = T,
+                                                    color = colorRampPalette(rev(brewer.pal(n = 11, name = "RdBu")))(100)))+ 
+  labs(title = "Signature Similarities", subtitle = "Abdelfattah 2022") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  theme(plot.subtitle = element_text(hjust = 0.5))
+
+wang.hm <- ggplotify::as.ggplot(pheatmap::pheatmap(wang.cor.mat,show_colnames = F, border_color = NA, cutree_cols = n.cut,cutree_rows = n.cut,
+                                                   breaks = my.breaks,fontsize_row =6, silent = T,
+                                                   color = colorRampPalette(rev(brewer.pal(n = 11, name = "RdBu")))(100)))+ 
+  labs(title = "Signature Similarities", subtitle = "Wang 2022") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  theme(plot.subtitle = element_text(hjust = 0.5))
+
+plt.profile.similarities <- cowplot::plot_grid(gl261.hm, ct2a.hm, pr.hm, neftel.hm, 
+                                               richards.hm, mrd.hm, yu.hm, abdel.hm,
+                                               wang.hm,nrow = 3, labels = "AUTO")
+plt.profile.similarities
+# savePDF(file.name = "signature_similarities_090621.pdf", plt.profile.similarities, fig.width=20, fig.height=10)
+
+```
+
+```{r compare CT2A vs GL261 signatures, fig.width=12, fig.height=6}
+
+# combine data.frames
+df.ct2a.cor.long <- pivot_longer(df.ct2a.cor, cols = colnames(df.ct2a.cor))
+df.ct2a.cor.long$sample <- "CT2A"
+
+df.gl261.cor.long <- pivot_longer(df.gl261.cor, cols = colnames(df.gl261.cor))
+df.gl261.cor.long$sample <- "GL261"
+
+df.auc.score.long <- bind_rows(df.ct2a.cor.long, df.gl261.cor.long)
+
+cowplot::plot_grid(ct2a.hm, gl261.hm)
+
+df.auc.score.long <- df.auc.score.long %>% dplyr::filter(!grepl("CT2A|GL261|NMF", name))
+
+df.auc.score.long <- df.auc.score.long %>%
+  dplyr::group_by(name) %>%
+  dplyr::mutate(
+    value.norm = value - mean(value[sample %in% "GL261"])
+  )
+
+df.auc.score.long.sum  <- df.auc.score.long %>%
+  dplyr::group_by(sample, name) %>%
+  dplyr::summarize(
+    val = mean(value.norm)
+  )
+
+df.auc.score.long.sum  <- df.auc.score.long %>%
+  dplyr::group_by(name) %>%
+  dplyr::summarize(
+    dif = mean(value.norm[sample %in% "CT2A"]) - mean(value.norm[sample %in% "GL261"])
+  ) %>%
+  dplyr::arrange(-dif)
+
+df.auc.score.long.sum$name <- factor(df.auc.score.long.sum$name, levels = df.auc.score.long.sum$name)
+df.auc.score.long$name <- factor(df.auc.score.long$name, levels = df.auc.score.long.sum$name)
+
+
+
+plt.dif <- df.auc.score.long.sum %>%
+  dplyr::filter(!c(name %in% c("CT2A.score", "GL261.score"))) %>%
+  ggplot(aes(x = name, y = dif)) + 
+  geom_segment(aes(xend = name, yend = 0))  +
+  geom_point(aes(size=  abs(dif), fill = dif), pch = 21) + 
+  theme_miko(x.axis.rotation = 20, legend = F) + 
+  geom_hline(yintercept = 0, linetype = "dashed") + 
+  scale_fill_gradient2(low = gl261.color, high = ct2a.color) + 
+  labs(x = "Signature", y = "Difference") +   
+  theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank())
+
+plt.auc <- df.auc.score.long %>%
+  dplyr::filter(!c(name %in% c("CT2A.score", "GL261.score"))) %>%
+  ggplot(aes(x = name, y = value, fill = sample)) + 
+  # geom_violin() + 
+  geom_split_violin(width = 1) +
+  scale_fill_manual(values = c("GL261" = gl261.color, "CT2A" = ct2a.color)) + 
+  theme_miko(x.axis.rotation = 20, legend = T) +
+  theme(legend.position="bottom") +
+  labs(y = "Score", x = "") + 
+  theme(axis.title.x=element_blank())
+
+plt.leg <- cowplot::get_legend(plt.auc)
+plt.auc <- plt.auc + theme_miko(x.axis.rotation = 20, legend = F)
+
+plt.score.combo <- cowplot::plot_grid(plt.leg, cowplot::plot_grid(plt.dif, NULL, plt.auc, ncol = 1, rel_heights = c(0.5,0, 1.1), align = "v"), rel_heights = c(0.2, 1.6), ncol = 1)
+plt.score.combo
+
+plt.cor.combo <- cowplot::plot_grid(ct2a.hm, gl261.hm)
+
+```
+
+
+```{r, fig.width=10, fig.height=6}
+
+df.score <- df.gl261.cor
+object <- so.gl261
+
+clusterSignatureHM <- function(df.score, object, plt.subtitle = NULL){
+  df.score2 <- df.score
+  df.score2$cluster <- object@meta.data[["seurat_clusters"]]
+  df.score2.long <- pivot_longer(df.score2, cols= c(colnames(df.score)))
+  df.score2.sum <- df.score2.long %>%
+    dplyr::group_by(name, cluster) %>%
+    dplyr::summarize(
+      val = mean((value))
+    )
+  
+  df.score2.wide <- pivot_wider(df.score2.sum, names_from = "name", values_from = "val")
+  df.score2.wide <- col2rowname(df.score2.wide, "cluster")
+
+  cor.hm <- ggplotify::as.ggplot(pheatmap::pheatmap(t(df.score2.wide),show_colnames = T, 
+                                                    border_color = NA, cutree_cols = 4,cutree_rows = 3,
+                                                    clustering_distance_rows = "euclidean", 
+                                                    clustering_distance_cols = "euclidean",
+                                                    fontsize_row =6,  scale = "row", silent = T,
+                                                    color = colorRampPalette(rev(brewer.pal(n = 11, name = "RdBu")))(100))) + 
+    labs(title = "Cluster Signatures", subtitle = plt.subtitle) +
+    theme(plot.title = element_text(hjust = 0.5)) +
+    theme(plot.subtitle = element_text(hjust = 0.5))
+  
+  return(cor.hm)
+}
+
+# GL261 ########################################################################
+gl261.cor.hm <- clusterSignatureHM(df.score = df.gl261.cor, object = so.gl261, plt.subtitle = "GL261")
+ct2a.cor.hm <- clusterSignatureHM(df.score = df.ct2a.cor, object = so.ct2a, plt.subtitle = "CT2A")
+
+pr.cor.hm <- clusterSignatureHM(df.score = df.pr.cor, object = so.hs.tumor, plt.subtitle = "Primary-Recurrent Hs")
+neftel.cor.hm <- clusterSignatureHM(df.score = df.neftel.cor, object = so.neftel, plt.subtitle = "Neftel 2019")
+mrd.cor.hm <- clusterSignatureHM(df.score = df.mrd.cor, object = so.mrd, plt.subtitle = "MRD 2021")
+richards.cor.hm <- clusterSignatureHM(df.score = df.richards.cor, object = so.richards, plt.subtitle = "Richards 2021")
+
+pr.cor.hm
+neftel.cor.hm
+mrd.cor.hm
+richards.cor.hm
+
+plt.cluster.cor.combo <- cowplot::plot_grid(ct2a.cor.hm, gl261.cor.hm)
+
+print(plt.cluster.cor.combo)
+
+```
+
+
+
+```{r fig.width=12, fig.height=15}
+
+plt.gl261.ct2a.sig <- cowplot::plot_grid(plt.score.combo,plt.cor.combo, plt.cluster.cor.combo, ncol = 1, rel_heights = c(1.2,1.7, 1.7))
+# savePDF(file.name = "signature_murine_models_comparison_090621.pdf", plt.gl261.ct2a.sig, fig.width=12, fig.height=15)
+
+```
+
+
+
+```{r classify clusters based on signature similarities}
+
+ct2a.cluster.ann <- list(
+  c1 = c(12, 15),
+  c2 = c(2, 4, 10), 
+  c3 = c(0, 8, 13, 3, 9),
+  c4 = c(5,6,14,11,1,16,7,17)
+)
+
+gl261.cluster.ann <- list(
+  g1 = c(8, 3, 1, 14),
+  g2 = c(9,13,2,6,11,12,0,5),
+  g3 = c(4,7,10,15),
+  g4 = c(16)
+)
+
+object <- so.gl261
+new.field.name <- "invivo.class"
+old.field.name <- "seurat_clusters"
+mapping.list <- gl261.cluster.ann
+
+soAnnotate <- function(object, mapping.list, new.field.name, old.field.name){
+  object@meta.data[[new.field.name]] <- NA
+  for (i in 1:length(mapping.list)){
+    object@meta.data[[new.field.name]][object@meta.data[[old.field.name]] %in% mapping.list[[i]]] <- names(mapping.list)[i]
+  }
+  object@meta.data[[new.field.name]] <- factor(object@meta.data[[new.field.name]], levels = names(mapping.list))
+  return(object)
+}
+
+so.ct2a <- soAnnotate(so.ct2a, mapping.list = ct2a.cluster.ann, 
+                      new.field.name = "invivo.class", old.field.name = "seurat_clusters")
+
+so.gl261 <- soAnnotate(so.gl261, mapping.list = gl261.cluster.ann, 
+                       new.field.name = "invivo.class", old.field.name = "seurat_clusters")
+
+cluster.UMAP(so.ct2a, group.by = "invivo.class") + theme_miko(legend = T) 
+cluster.UMAP(so.gl261, group.by = "invivo.class") + theme_miko(legend = T) 
+
+
+deg.ct2a.class <- presto:::wilcoxauc.Seurat(X = so.ct2a, group_by = 'invivo.class', assay = 'data', seurat_assay = 'RNA')
+deg.ct2a.class$pct.dif  <- deg.ct2a.class$pct_in - deg.ct2a.class$pct_out
+deg.ct2a.class <- deg.ct2a.class %>% dplyr::filter(logFC > 0, pct.dif > 0, auc > 0.5, padj < 0.01)
+
+deg.gl261.class <- presto:::wilcoxauc.Seurat(X = so.gl261, group_by = 'invivo.class', assay = 'data', seurat_assay = 'RNA')
+deg.gl261.class$pct.dif  <- deg.gl261.class$pct_in - deg.gl261.class$pct_out
+deg.gl261.class <- deg.gl261.class %>% dplyr::filter(logFC > 0, pct.dif > 0, auc > 0.5, padj < 0.01)
+
+deg.class.gl261.top.auc <- deg.gl261.class %>%
+  dplyr::group_by(group) %>%
+  top_n(2, auc)
+
+deg.class.ct2a.top.auc <- deg.ct2a.class %>%
+  dplyr::group_by(group) %>%
+  top_n(2, auc)
+
+top.class.auc.div7.genes <- unique(as.character(deg.class.gl261.top.auc$feature))
+top.class.auc.cgr8.genes <- unique(as.character(deg.class.ct2a.top.auc$feature))
+
+```
+
+```{r # merge signature scores with seruat object}
+  
+  # 
+  so.gl261.meta <- so.gl261@meta.data
+  try({so.gl261.meta <- so.gl261.meta %>% dplyr::select(-colnames(df.gl261.cor))}, silent = T)
+  so.gl261.meta <- bind_cols(so.gl261.meta, df.gl261_notf)
+  so.gl261@meta.data <- so.gl261.meta
+  
+  so.ct2a.meta <- so.ct2a@meta.data
+  try({so.ct2a.meta <- so.ct2a.meta %>% dplyr::select(-colnames(df.ct2a.cor))}, silent = T)
+  so.ct2a.meta <- bind_cols(so.ct2a.meta, df.ct2a_notf)
+  so.ct2a@meta.data <- so.ct2a.meta
+  
+  so.pr.meta <- so.hs.tumor@meta.data
+  try({so.pr.meta <- so.pr.meta %>% dplyr::select(-colnames(df.pr.cor))}, silent = T)
+  so.pr.meta <- bind_cols(so.pr.meta, df.pr_notf)
+  so.hs.tumor@meta.data <- so.pr.meta
+  
+  so.mrd.meta <- so.mrd@meta.data
+  try({so.mrd.meta <- so.mrd.meta %>% dplyr::select(-colnames(df.mrd.cor))}, silent = T)
+  so.mrd.meta <- bind_cols(so.mrd.meta, df.mrd_notf)
+  so.mrd@meta.data <- so.mrd.meta
+  
+  
+  so.neftel.meta <- so.neftel@meta.data
+  try({so.neftel.meta <- so.neftel.meta %>% dplyr::select(-colnames(df.neftel.cor))}, silent = T)
+  so.neftel.meta <- bind_cols(so.neftel.meta, df.neftel_notf)
+  so.neftel@meta.data <- so.neftel.meta
+  
+  so.richards.meta <- so.richards@meta.data
+  try({so.richards.meta <- so.richards.meta %>% dplyr::select(-colnames(df.richards.cor))}, silent = T)
+  so.richards.meta <- bind_cols(so.richards.meta, df.richards_notf)
+  so.richards@meta.data <- so.richards.meta
+  
+  so.yu.meta <- so.yu@meta.data
+  try({so.yu.meta <- so.yu.meta %>% dplyr::select(-colnames(df.yu.cor))}, silent = T)
+  so.yu.meta <- bind_cols(so.yu.meta, df.yu_notf)
+  so.yu@meta.data <- so.yu.meta
+  
+  so.abdel.meta <- so.abdel@meta.data
+  try({so.abdel.meta <- so.abdel.meta %>% dplyr::select(-colnames(df.abdel.cor))}, silent = T)
+  so.abdel.meta <- bind_cols(so.abdel.meta, df.abdel_notf)
+  so.abdel@meta.data <- so.abdel.meta
+  
+  so.wang.meta <- so.wang@meta.data
+  try({so.wang.meta <- so.wang.meta %>% dplyr::select(-colnames(df.wang.cor))}, silent = T)
+  so.wang.meta <- bind_cols(so.wang.meta, df.wang_notf)
+  so.wang@meta.data <- so.wang.meta
+  
+```
+
+```{r axis of variation}
+
+  variableTF <- function(object, species, covar = c( "seurat_clusters", "percent.mt", "Phase", "seq.coverage")){
+  
+    DefaultAssay(object) <- "SCT"
+    data(geneSets)
+
+    atf.all <- firstup(c(unlist(geneSets[["AnimalTFDB"]][ ,"Mm"]), unlist(geneSets[["AnimalTFDB"]][ ,"Hs"])))
+    trust.all <- firstup(c(colnames(geneSets[[paste0("TRRUSTv2_", "Mm")]]), colnames(geneSets[[paste0("TRRUSTv2_", "Hs")]])))
+    
+    if (species == "Mm"){
+      tf.all <- firstup(unique(c(atf.all, trust.all)))
+    } else if (species == "Hs"){
+      tf.all <- toupper(unique(c(atf.all, trust.all)))
+    }
+
+    var.gene <- rownames(object)
+    
+    var.tf <- tf.all[tf.all %in% var.gene]
+    
+    var.decomp.parameters <- list(
+      covariates = covar,
+      interactions = NULL
+    )
+    
+    # step 1
+    vd_model.list <- vd_Formula(object = object,
+                                covariates = var.decomp.parameters$covariates,
+                                interactions = var.decomp.parameters$interaction)
+    
+    # step 2
+    vd_inputs.list <- vd_Inputs(object = object, 
+                                vd_model.list = vd_model.list, 
+                                features = var.tf,
+                                pct.min =  0, 
+                                variable.features = F, 
+                                subsample.factor = 1)
+    
+    # step 3: run variance decomposition
+    vd_results.list <- vd_Run(vd_inputs.list, n.workers = 16)
+    
+    res.var2 <- vd_results.list$varPart.format1
+    res.var3 <- as.data.frame(res.var2)
+    
+    return(res.var3)
+    
+  }
+  
+  variableTF_v2 <- function(object, species, covar = c( "seurat_clusters", "percent.mt", "Phase", "seq.coverage")){
+    
+    
+    DefaultAssay(object) <- "SCT"
+    data(geneSets)
+
+    atf.all <- firstup(c(unlist(geneSets[["AnimalTFDB"]][ ,"Mm"]), unlist(geneSets[["AnimalTFDB"]][ ,"Hs"])))
+    trust.all <- firstup(c(colnames(geneSets[[paste0("TRRUSTv2_", "Mm")]]), colnames(geneSets[[paste0("TRRUSTv2_", "Hs")]])))
+    
+    if (species == "Mm"){
+      tf.all <- firstup(unique(c(atf.all, trust.all)))
+    } else if (species == "Hs"){
+      tf.all <- toupper(unique(c(atf.all, trust.all)))
+    }
+
+    var.gene <- rownames(object)
+    
+    var.tf <- tf.all[tf.all %in% var.gene]
+    res.var4 <- NULL
+    for (i in 1:length(covar)){
+      
+      var.decomp.parameters <- list(
+        covariates = covar[i],
+        interactions = NULL
+      )
+      
+      # step 1
+      vd_model.list <- vd_Formula(object = object,
+                                  covariates = var.decomp.parameters$covariates,
+                                  interactions = var.decomp.parameters$interaction)
+      
+      # step 2
+      vd_inputs.list <- vd_Inputs(object = object, 
+                                  vd_model.list = vd_model.list, 
+                                  features = var.tf,
+                                  pct.min =  0, 
+                                  variable.features = F, 
+                                  subsample.factor = 1)
+      
+      # step 3: run variance decomposition
+      vd_results.list <- vd_Run(vd_inputs.list, n.workers = 16)
+      
+      gc()
+      
+      res.var2 <- vd_results.list$varPart.format1
+      res.var3 <- as.data.frame(res.var2)
+      
+      res.var3 <- res.var3 %>% dplyr::select(-c("Residuals"))
+      res.var3$gene <- rownames(res.var3)
+      
+      if (is.null(res.var4)){
+        res.var4 <- res.var3
+      } else {
+        res.var4 <- merge(res.var4, res.var3, by="gene")
+      }
+      
+    }
+    
+    
+    res.var4 <- col2rowname(res.var4, "gene")
+    
+    return(res.var4)
+    
+  }
+  
+  runRF <- function(object, species, covar, assay = "SCT"){
+    
+    
+    DefaultAssay(object) <- assay
+    data(geneSets)
+    
+    atf.all <- firstup(c(unlist(geneSets[["AnimalTFDB"]][ ,"Mm"]), unlist(geneSets[["AnimalTFDB"]][ ,"Hs"])))
+    trust.all <- firstup(c(colnames(geneSets[[paste0("TRRUSTv2_", "Mm")]]), colnames(geneSets[[paste0("TRRUSTv2_", "Hs")]])))
+    
+    if (species == "Mm"){
+      tf.all <- firstup(unique(c(atf.all, trust.all)))
+    } else if (species == "Hs"){
+      tf.all <- toupper(unique(c(atf.all, trust.all)))
+    }
+    
+    var.gene <- rownames(object)
+    var.tf <- tf.all[tf.all %in% var.gene]
+  
+    all.hvg <- var.tf
+    
+    all.res <- list()
+    
+    df.vi.all <- NULL
+    df.norm.all <-NULL
+    for (i in 1:length(covar)){
+      
+      message(Sys.time() , ": Fitting model to ", covar[i], "...")
+      
+      RF.output <- NULL
+      RF.output <- pseudotimeRF(so = object, 
+                                hvg = all.hvg, 
+                                pseudotimes = object@meta.data[ ,covar[i]], 
+                                lineage.name = "", 
+                                slot = "data", 
+                                assay = DefaultAssay(object),
+                                num.threads = 16)
+
+      plt.rf <- data.frame(RF.output[["prediction"]]) %>% 
+        dplyr::filter(truth > 0) %>%
+        ggplot(aes(x = truth,y = estimate)) + 
+        geom_point() + geom_abline(slope = 1, color = "tomato", size = 1, linetype = "dashed") + 
+        labs(title = "In Vivo Pseudotime Prediction", subtitle = paste0("RF R2 = ", RF.output$performance$rsq)) + 
+        xlab("Pseudotime (Truth)") + ylab("Pseudotime (Estimate)") + 
+        theme_miko()
+      
+      var.imp <- sort(RF.output$model$fit$variable.importance, decreasing = TRUE)
+      
+      df.vi <- NULL
+      df.vi <- data.frame(gene = names(var.imp), imp = signif(as.vector(var.imp),3))
+      df.vi <- df.vi %>% dplyr::filter(gene != "batch")
+
+      dat1 <- df.vi
+      colnames(dat1) <- c("gene", covar[i])
+
+      if (is.null(df.vi.all)){
+        df.vi.all <- dat1
+      } else {
+        df.vi.all <- merge(df.vi.all, dat1, by = "gene")
+      }
+      
+    }
+    
+    df.vi.all <- col2rowname(df.vi.all, "gene")
+    return(df.vi.all)
+    
+  }
+  
+  so.gl261.clean <- cleanCluster(clusterFilter(so.gl261, omit = c("15", "16")))
+  so.ct2a.clean <- cleanCluster(clusterFilter(so.ct2a, omit = c("15")))
+  
+  DefaultAssay(so.gl261.clean) <- "SCT"
+  DefaultAssay(so.ct2a.clean) <- "SCT"
+  DefaultAssay(so.hs.tumor) <- "SCT"
+  DefaultAssay(so.neftel) <- "SCT"
+  DefaultAssay(so.richards) <- "SCT"
+  DefaultAssay(so.mrd) <- "SCT"
+  DefaultAssay(so.yu) <- "SCT"
+  DefaultAssay(so.abdel) <- "SCT"
+  DefaultAssay(so.wang) <- "SCT"
+  
+  
+  cov.all <- colnames(df.gl261_notf)
+  
+  do.rf <- F
+  
+  if (do.rf){
+    df.vd.gl261 <-  runRF(object = so.gl261.clean, species = "Mm", covar = cov.all, assay = "SCT"); gc()
+    df.vd.ct2a <-  runRF(object = so.ct2a.clean, species = "Mm", covar = cov.all, assay = "SCT"); gc()
+    
+    df.vd.pr <-  runRF(object = so.hs.tumor, species = "Hs", covar = cov.all, assay = "SCT"); gc()
+    df.vd.neftel <-  runRF(object = so.neftel, species = "Hs", covar = cov.all, assay = "SCT"); gc()
+
+    df.vd.richards <-  runRF(object = so.richards, species = "Hs", covar = cov.all, assay = "SCT"); gc
+    df.vd.mrd <-  runRF(object = so.mrd, species = "Hs", covar = cov.all, assay = "SCT"); gc()
+    df.vd.yu <-  runRF(object = so.yu, species = "Hs", covar = cov.all, assay = "SCT"); gc()
+    df.vd.abdel <-  runRF(object = so.abdel, species = "Hs", covar = cov.all, assay = "SCT"); gc()
+    df.vd.wang <-  runRF(object = so.wang, species = "Hs", covar = cov.all, assay = "SCT"); gc()
+    
+    df.vd.res <- list(
+      gl261 = df.vd.gl261, 
+      ct2a = df.vd.ct2a , 
+      pr = df.vd.pr, 
+      neftel = df.vd.neftel, 
+      mrd = df.vd.mrd, 
+      richards = df.vd.richards,
+      yu = df.vd.yu,
+      abdel = df.vd.abdel,
+      wang = df.vd.wang
+    )
+    save(df.vd.res, file = "RF_tf_results_batchRegressed_120423.Rdata")
+    
+  } else {
+    load("RF_tf_results_batchRegressed_120423.Rdata")
+    
+    df.vd.gl261 <-  df.vd.res$gl261
+    df.vd.ct2a <-  df.vd.res$ct2a
+    df.vd.pr <-  df.vd.res$pr
+    df.vd.neftel <-  df.vd.res$neftel
+    df.vd.mrd <- df.vd.res$mrd
+    df.vd.richards <-  df.vd.res$richards
+    df.vd.yu <-  df.vd.res$yu
+    df.vd.abdel <- df.vd.res$abdel
+    df.vd.wang <-  df.vd.res$wang
+    
+    rm(df.vd.res); gc()
+  }
+  
+
+```
+
+```{r get signature - gene correlations}
+  
+  sgCorrelations <- function(object, species, covar){
+    
+    DefaultAssay(object) <- "SCT"
+    data(geneSets)
+    
+    atf.all <- firstup(c(unlist(geneSets[["AnimalTFDB"]][ ,"Mm"]), unlist(geneSets[["AnimalTFDB"]][ ,"Hs"])))
+    trust.all <- firstup(c(colnames(geneSets[[paste0("TRRUSTv2_", "Mm")]]), colnames(geneSets[[paste0("TRRUSTv2_", "Hs")]])))
+    
+    if (species == "Mm"){
+      tf.all <- firstup(unique(c(atf.all, trust.all)))
+    } else if (species == "Hs"){
+      tf.all <- toupper(unique(c(atf.all, trust.all)))
+    }
+    
+    var.gene <- rownames(object)
+    var.tf <- tf.all[tf.all %in% var.gene]
+    
+    # count-based correlations
+    expr.mat <- getExpressionMatrix(so = object, which.data = "data")
+    expr.mat <- as.matrix(t(expr.mat[rownames(expr.mat) %in% var.tf, ]))
+    sig.mat <- as.matrix(object@meta.data[ ,covar])
+    cor.mat <- as.data.frame(cor(expr.mat, sig.mat, method = "spearman"))
+    cor.mat <- cor.mat[order(rownames(cor.mat)), ]
+    
+    return(cor.mat)
+    
+  }
+  
+  df.cor.gl261 <-  sgCorrelations(object = so.gl261.clean, species = "Mm", covar = cov.all); gc()
+  df.cor.ct2a <-  sgCorrelations(object = so.ct2a.clean, species = "Mm", covar = cov.all); gc()
+  df.cor.pr <-  sgCorrelations(object = so.hs.tumor, species = "Hs", covar = cov.all); gc()
+  df.cor.neftel <-  sgCorrelations(object = so.neftel, species = "Hs", covar = cov.all); gc()
+  df.cor.mrd <-  sgCorrelations(object = so.mrd, species = "Hs", covar = cov.all); gc()
+  df.cor.richards <-  sgCorrelations(object = so.richards, species = "Hs", covar = cov.all); gc()
+  df.cor.yu <-  sgCorrelations(object = so.yu, species = "Hs", covar = cov.all); gc()
+  df.cor.abdel <-  sgCorrelations(object = so.abdel , species = "Hs", covar = cov.all); gc()
+  df.cor.wang <-  sgCorrelations(object = so.wang, species = "Hs", covar = cov.all); gc()
+  
+  df.cor <- df.cor.gl261
+  df.rf <- df.vd.gl261
+  
+  signedImportance <- function(df.cor, df.rf){
+    
+    xy.col <- intersect(colnames(df.cor), colnames(df.rf))
+    xy.row <- intersect(rownames(df.cor), rownames(df.rf))
+    
+    df.si <- NULL
+    for (i in 1:length(xy.col)){
+      
+      df.si.cur <- NULL
+      df.si.cur <- merge(data.frame(gene = rownames(df.cor), x = unlist(df.cor[, xy.col[i]])),
+                         data.frame(gene = rownames(df.rf), y = unlist(df.rf[, xy.col[i]])),
+                         by = "gene")
+      
+      
+      df.si.cur$z <- sign(df.si.cur$x) * df.si.cur$y
+      
+      df.si.cur <- df.si.cur[ ,c("gene", "z")]
+      colnames(df.si.cur) <- c("gene",  xy.col[i])
+      if (is.null(df.si)){
+        df.si <- df.si.cur
+      } else {
+        df.si <- merge(df.si, df.si.cur, by = "gene")
+      }
+    }
+    
+    df.si <- col2rowname(df.si, "gene")
+    
+    return(df.si)
+    
+  }
+  
+  df.si.gl261 <- signedImportance(df.cor = df.cor.gl261, df.rf = df.vd.gl261)
+  df.si.ct2a <- signedImportance(df.cor = df.cor.ct2a, df.rf = df.vd.ct2a)
+  df.si.pr <- signedImportance(df.cor = df.cor.pr, df.rf = df.vd.pr)
+  df.si.neftel <- signedImportance(df.cor = df.cor.neftel, df.rf = df.vd.neftel)
+  df.si.richards <- signedImportance(df.cor = df.cor.richards, df.rf = df.vd.richards)
+  df.si.mrd <- signedImportance(df.cor = df.cor.mrd, df.rf = df.vd.mrd)
+  df.si.yu <- signedImportance(df.cor = df.cor.yu, df.rf = df.vd.yu)
+    df.si.abdel <- signedImportance(df.cor = df.cor.abdel, df.rf = df.vd.abdel)
+      df.si.wang <- signedImportance(df.cor = df.cor.wang, df.rf = df.vd.wang)
+
+```
+  
+  
+  
+```{r visualize ranked importance, fig.width=16, fig.height=5}
+  
+  rankedImportance <- function(which.field, highlight.genes,  df.n = df.si.neftel, df.m = df.si.mrd, df.p = df.si.pr, df.g = df.si.gl261, df.c = df.si.ct2a, df.r = df.si.richards, df.y = df.si.yu, df.a = df.si.abdel, df.w = df.si.wang, mo = Inf){
+    
+    
+    df.n$score <- df.n[ ,which.field]; df.n$gene <- rownames(df.n); df.n$rank <- rank(df.n$score)
+    df.p$score <- df.p[ ,which.field]; df.p$gene <- rownames(df.p); df.p$rank <- rank(df.p$score)
+    df.g$score <- df.g[ ,which.field]; df.g$gene <- rownames(df.g); df.g$rank <- rank(df.g$score)
+    df.c$score <- df.c[ ,which.field]; df.c$gene <- rownames(df.c); df.c$rank <- rank(df.c$score)
+    df.r$score <- df.r[ ,which.field]; df.r$gene <- rownames(df.r); df.r$rank <- rank(df.r$score)
+    df.m$score <- df.m[ ,which.field]; df.m$gene <- rownames(df.m); df.m$rank <- rank(df.m$score)
+    
+    df.y$score <- df.y[ ,which.field]; df.y$gene <- rownames(df.y); df.y$rank <- rank(df.y$score)
+    df.a$score <- df.a[ ,which.field]; df.a$gene <- rownames(df.a); df.a$rank <- rank(df.a$score)
+    df.w$score <- df.w[ ,which.field]; df.w$gene <- rownames(df.w); df.w$rank <- rank(df.w$score)
+    
+    plt.n.imp <- df.n %>%
+      ggplot(aes(x = rank, y = score)) + 
+      geom_point() + 
+      ggrepel::geom_text_repel(data = df.n %>% dplyr::filter(gene %in% highlight.genes), max.overlaps = mo,
+                               aes(label = gene, x = rank, y = score), size = 3, color = "tomato") + 
+      scale_color_manual(values = c("TRUE" = "tomato", "FALSE" = "grey")) + 
+      theme_miko(legend = F) + 
+      geom_hline(yintercept = 0, linetype = "dashed") + 
+      labs(title = "Neftel 2019", subtitle = which.field, y = "Signed Importance", x = "Rank")
+    
+    
+    plt.m.imp <-   df.m %>%
+      ggplot(aes(x = rank, y = score)) + 
+      geom_point() + 
+      ggrepel::geom_text_repel(data = df.m %>% dplyr::filter(gene %in% highlight.genes), max.overlaps = mo,
+                               aes(label = gene, x = rank, y = score), size = 3, color = "tomato") + 
+      scale_color_manual(values = c("TRUE" = "tomato", "FALSE" = "grey")) + 
+      theme_miko(legend = F) + 
+      geom_hline(yintercept = 0, linetype = "dashed") + 
+      labs(title = "Qazi 2022", subtitle = which.field, y = "Signed Importance", x = "Rank")
+    
+    plt.p.imp <-   df.p %>%
+      ggplot(aes(x = rank, y = score)) + 
+      geom_point() + 
+      ggrepel::geom_text_repel(data = df.p %>% dplyr::filter(gene %in% highlight.genes), max.overlaps = mo,
+                               aes(label = gene, x = rank, y = score), size = 3, color = "tomato") + 
+      scale_color_manual(values = c("TRUE" = "tomato", "FALSE" = "grey")) + 
+      theme_miko(legend = F) + 
+      geom_hline(yintercept = 0, linetype = "dashed") + 
+      labs(title = "Mikolajewicz 2023", subtitle = which.field, y = "Signed Importance", x = "Rank")
+    
+    plt.c.imp <-     df.c %>%
+      ggplot(aes(x = rank, y = score)) + 
+      geom_point() + 
+      ggrepel::geom_text_repel(data = df.c %>% dplyr::filter(firstup(gene) %in% firstup(highlight.genes)), max.overlaps = mo,
+                               aes(label = gene, x = rank, y = score), size = 3, color = "tomato") + 
+      scale_color_manual(values = c("TRUE" = "tomato", "FALSE" = "grey")) + 
+      theme_miko(legend = F) + 
+      geom_hline(yintercept = 0, linetype = "dashed") + 
+      labs(title = "CT2A", subtitle = which.field, y = "Signed Importance", x = "Rank")
+    
+    plt.g.imp <-     df.g %>%
+      ggplot(aes(x = rank, y = score)) + 
+      geom_point() + 
+      ggrepel::geom_text_repel(data = df.g %>% dplyr::filter(firstup(gene) %in% firstup(highlight.genes)), max.overlaps = mo,
+                               aes(label = gene, x = rank, y = score), size = 3, color = "tomato") + 
+      scale_color_manual(values = c("TRUE" = "tomato", "FALSE" = "grey")) + 
+      theme_miko(legend = F) + 
+      geom_hline(yintercept = 0, linetype = "dashed") + 
+      labs(title = "GL261", subtitle = which.field, y = "Signed Importance", x = "Rank") 
+    
+    
+    plt.r.imp <-    df.r %>%
+      ggplot(aes(x = rank, y = score)) + 
+      geom_point() + 
+      ggrepel::geom_text_repel(data = df.r %>% dplyr::filter(gene %in% highlight.genes), max.overlaps = mo,
+                               aes(label = gene, x = rank, y = score), size = 3, color = "tomato") + 
+      scale_color_manual(values = c("TRUE" = "tomato", "FALSE" = "grey")) + 
+      theme_miko(legend = F) + 
+      geom_hline(yintercept = 0, linetype = "dashed") + 
+      labs(title = "Richards 2021", subtitle = which.field, y = "Signed Importance", x = "Rank")
+    
+        plt.y.imp <-    df.y %>%
+      ggplot(aes(x = rank, y = score)) + 
+      geom_point() + 
+      ggrepel::geom_text_repel(data = df.y %>% dplyr::filter(gene %in% highlight.genes), max.overlaps = mo,
+                               aes(label = gene, x = rank, y = score), size = 3, color = "tomato") + 
+      scale_color_manual(values = c("TRUE" = "tomato", "FALSE" = "grey")) + 
+      theme_miko(legend = F) + 
+      geom_hline(yintercept = 0, linetype = "dashed") + 
+      labs(title = "Yu 2018", subtitle = which.field, y = "Signed Importance", x = "Rank")
+        
+            plt.a.imp <-    df.a %>%
+      ggplot(aes(x = rank, y = score)) + 
+      geom_point() + 
+      ggrepel::geom_text_repel(data = df.a %>% dplyr::filter(gene %in% highlight.genes), max.overlaps = mo,
+                               aes(label = gene, x = rank, y = score), size = 3, color = "tomato") + 
+      scale_color_manual(values = c("TRUE" = "tomato", "FALSE" = "grey")) + 
+      theme_miko(legend = F) + 
+      geom_hline(yintercept = 0, linetype = "dashed") + 
+      labs(title = "Abdelfattah 2022", subtitle = which.field, y = "Signed Importance", x = "Rank")
+            
+                plt.w.imp <-    df.w %>%
+      ggplot(aes(x = rank, y = score)) + 
+      geom_point() + 
+      ggrepel::geom_text_repel(data = df.w %>% dplyr::filter(gene %in% highlight.genes), max.overlaps = mo,
+                               aes(label = gene, x = rank, y = score), size = 3, color = "tomato") + 
+      scale_color_manual(values = c("TRUE" = "tomato", "FALSE" = "grey")) + 
+      theme_miko(legend = F) + 
+      geom_hline(yintercept = 0, linetype = "dashed") + 
+      labs(title = "Wang 2022", subtitle = which.field, y = "Signed Importance", x = "Rank")
+    
+    
+    return(cowplot::plot_grid(plt.n.imp, plt.m.imp, plt.p.imp, plt.c.imp, plt.g.imp, plt.r.imp, plt.y.imp, plt.a.imp, plt.w.imp, nrow= 1))
+  }
+  
+  highlight.which <- c("PRRX1", "WWTR1")
+  rankedImportance(which.field = "Mesenchymal_Verhaak2010", 
+                   highlight.genes = c(highlight.which),  
+                   df.n = df.si.neftel, df.m = df.si.mrd, df.p = df.si.pr, df.g = df.si.gl261, df.c = df.si.ct2a, df.r = df.si.richards,
+                   df.y = df.si.yu, df.a = df.si.abdel, df.w = df.si.wang)
+  
+  rankedImportance(which.field = "Injury_Response_Richards2021", 
+                   highlight.genes = c(highlight.which),  
+                   df.n = df.si.neftel, df.m = df.si.mrd, df.p = df.si.pr, df.g = df.si.gl261, df.c = df.si.ct2a, df.r = df.si.richards,
+                   df.y = df.si.yu, df.a = df.si.abdel, df.w = df.si.wang)
+  
+  rankedImportance(which.field = "MES2_Neftel2019", 
+                   highlight.genes = c(highlight.which),  
+                   df.n = df.si.neftel, df.m = df.si.mrd, df.p = df.si.pr, df.g = df.si.gl261, df.c = df.si.ct2a, df.r = df.si.richards,
+                   df.y = df.si.yu, df.a = df.si.abdel, df.w = df.si.wang)
+  
+  rankedImportance(which.field = "MES1_Neftel2019", 
+                   highlight.genes = c(highlight.which),  
+                   df.n = df.si.neftel, df.m = df.si.mrd, df.p = df.si.pr, df.g = df.si.gl261, df.c = df.si.ct2a, df.r = df.si.richards,
+                   df.y = df.si.yu, df.a = df.si.abdel, df.w = df.si.wang)
+  
+  plt.ex <- rankedImportance(which.field = "EMT_CancerSEA", 
+                             highlight.genes = c(highlight.which),  
+                             df.n = df.si.neftel, df.m = df.si.mrd, df.p = df.si.pr, df.g = df.si.gl261, df.c = df.si.ct2a, df.r = df.si.richards,
+                   df.y = df.si.yu, df.a = df.si.abdel, df.w = df.si.wang)
+  
+  # savePDF("ranked_importance_PRRX1_EMT_090621.pdf", plt.ex, fig.width=16, fig.height=5)
+```
+  
+  
+```{r helper functions}
+  
+  featureScatter <- function(object, feature.x, feature.y, log.x = F, log.y = F, raster = F, assay = DefaultAssay(object), slot = "data",  return.plot = T, plt.title = NULL, plt.subtitle = NULL, cor.method = "spearman", omit.zero = T){
+    
+    stopifnot("Seurat" %in% class(object))
+    DefaultAssay(object) <- assay
+    
+    # check where features located (meta.data or expr matrix)
+    
+    if (slot == "data"){
+      expr.flag.x <- feature.x %in% rownames(object@assays[[assay]]@data)
+      expr.flag.y <- feature.y %in% rownames(object@assays[[assay]]@data)
+    } else if (slot == "scale.data"){
+      expr.flag.x <-  feature.x %in%  rownames(object@assays[[assay]]@scale.data)
+      expr.flag.y <-  feature.y %in%  rownames(object@assays[[assay]]@scale.data)
+      
+      if (!expr.flag.x){
+        if ( feature.x %in% rownames(object@assays[[assay]]@data)){
+          try({
+            object <- GetResidual(object = object, features = feature.x, assay = assay)
+            expr.flag.x <-  feature.x %in%  rownames(object@assays[[assay]]@scale.data)
+          }, silent = T)
+        }
+      }
+      
+      if (!expr.flag.y){
+        if ( feature.y %in% rownames(object@assays[[assay]]@data)){
+          try({
+            object <- GetResidual(object = object, features = feature.y, assay = assay)
+            expr.flag.y <-  feature.y %in%  rownames(object@assays[[assay]]@scale.data)
+          }, silent = T)
+        }
+      }
+    }
+    
+    meta.flag.x <- feature.x %in% colnames(object@meta.data)
+    meta.flag.y <- feature.y %in% colnames(object@meta.data)
+    
+    if ("pca" %in% names( object@reductions)){
+      pca.flag.x <- feature.x %in% colnames(object@reductions[["pca"]])
+      pca.flag.y <- feature.y %in% colnames(object@reductions[["pca"]])
+    } else {
+      pca.flag.x <- pca.flag.y <- F
+    }
+    
+    df.dat <-  data.frame(cells  = colnames(object))
+    if (any(c(expr.flag.x, meta.flag.x, pca.flag.x))){
+      
+      which.x <- which(c(expr.flag.x, meta.flag.x, pca.flag.x))
+      if (length(which.x) > 1) stop("Multiple features matched")
+      
+      if (expr.flag.x){
+        if (slot == "data"){
+          df.dat$x <- object@assays[[assay]]@data[rownames(object@assays[[assay]]@data) %in% feature.x, ]
+        } else if (slot == "scale.data"){
+          df.dat$x <- object@assays[[assay]]@scale.data[rownames(object@assays[[assay]]@scale.data) %in% feature.x, ]
+        }
+      } else if (meta.flag.x){
+        df.dat$x <- object@meta.data[,feature.x]
+      } else  if (pca.flag.x){
+        df.dat$x <- object@reductions[["pca"]]@cell.embeddings[ ,feature.x]
+      }
+      
+      
+    } else {
+      stop(paste0(feature.x," not found."))
+    }
+    
+    if (any(c(expr.flag.y, meta.flag.y, pca.flag.y))){
+      
+      which.y <- which(c(expr.flag.y, meta.flag.y, pca.flag.y))
+      if (length(which.y) > 1) stop("Multiple features matched")
+      
+      if (expr.flag.y){
+        if (slot == "data"){
+          df.dat$y <- object@assays[[assay]]@data[rownames(object@assays[[assay]]@data) %in% feature.y, ]
+        } else if (slot == "scale.data"){
+          df.dat$y <- object@assays[[assay]]@scale.data[rownames(object@assays[[assay]]@scale.data) %in% feature.y, ]
+        }
+        
+        
+      } else if (meta.flag.y){
+        df.dat$y <- object@meta.data[,feature.y]
+      } else  if (pca.flag.y){
+        df.dat$y <- object@reductions[["pca"]]@cell.embeddings[ ,feature.y]
+      }
+      
+      
+    } else {
+      stop(paste0(feature.y," not found."))
+    }
+    
+    
+    if (omit.zero){
+      df.dat <- df.dat[df.dat$x != 0, ]
+      df.dat <- df.dat[df.dat$y != 0, ]
+    }
+    
+    if (is.null(plt.subtitle)){
+      
+      if (cor.method == "spearman"){
+        r.val <- signif(cor(df.dat$x, df.dat$y, method = cor.method), 3)
+        plt.subtitle <- paste0("r = ", r.val)
+      } else if (cor.method == "pearson"){
+        r.val <- signif(cor(df.dat$x, df.dat$y, method = cor.method), 3)
+        plt.subtitle <- paste0("rho = ", r.val)
+      }
+    }
+    
+    
+    
+    
+    if (return.plot){
+      
+      if (raster){
+        plt.scatter <- df.dat %>%
+          ggplot(aes(x = x, y = y)) + 
+          geom_smooth(method = "lm", color = "tomato") + 
+          scattermore::geom_scattermore() + 
+          labs(x = feature.x, y = feature.y, title = plt.title, subtitle = plt.subtitle) + 
+          theme_miko() + 
+          labs(title = plt.title, subtitle = plt.subtitle, 
+               x = feature.x, y = feature.y)     
+      } else {
+        plt.scatter <- df.dat %>%
+          ggplot(aes(x = x, y = y)) + 
+          geom_smooth(method = "lm", color = "tomato") + 
+          geom_point() + 
+          labs(x = feature.x, y = feature.y, title = plt.title, subtitle = plt.subtitle) + 
+          theme_miko() + 
+          labs(title = plt.title, subtitle = plt.subtitle, 
+               x = feature.x, y = feature.y)
+      }
+      
+      if (log.x){
+        plt.scatter <- plt.scatter + coord_trans(x="log1p")
+      }
+      if (log.y){
+        plt.scatter <- plt.scatter + coord_trans(y="log1p")
+      }   
+      
+      
+      return(plt.scatter)
+    } else {
+      return(df.dat)
+    }
+    
+  }
+  
+```
+  
+  
+  
+  
+```{r feature scatter helpers}
+  
+  plt.feature <- "Prrx1"
+  which.slot <- "data"
+  featureScatter(object = so.gl261.clean, feature.x = plt.feature, feature.y = "EMT_CancerSEA", omit.zero = F, slot = which.slot)
+  featureScatter(object = so.ct2a.clean, feature.x = plt.feature, feature.y = "EMT_CancerSEA", omit.zero = F, slot = which.slot)
+  featureScatter(object = so.richards, feature.x = toupper(plt.feature), feature.y = "EMT_CancerSEA", omit.zero = F, slot = which.slot)
+  featureScatter(object = so.mrd, feature.x = toupper(plt.feature), feature.y = "EMT_CancerSEA", omit.zero = F, slot = which.slot)
+  featureScatter(object = so.neftel, feature.x = toupper(plt.feature), feature.y = "EMT_CancerSEA", omit.zero = F, slot = which.slot)
+    featureScatter(object = so.yu, feature.x = toupper(plt.feature), feature.y = "EMT_CancerSEA", omit.zero = F, slot = which.slot)
+  featureScatter(object = so.abdel, feature.x = toupper(plt.feature), feature.y = "EMT_CancerSEA", omit.zero = F, slot = which.slot)
+  featureScatter(object = so.wang, feature.x = toupper(plt.feature), feature.y = "EMT_CancerSEA", omit.zero = F, slot = which.slot)
+  
+  plt.feature <- "Wwtr1"
+  which.slot <- "scale.data"
+  featureScatter(object = so.gl261.clean, feature.x = "Developmental_Richards2021", feature.y = "Injury_Response_Richards2021", omit.zero = F, slot = which.slot)
+  featureScatter(object = so.ct2a.clean, feature.x = "Developmental_Richards2021", feature.y = "Injury_Response_Richards2021", omit.zero = F, slot = which.slot)
+  featureScatter(object = so.richards, feature.x = "Developmental_Richards2021", feature.y = "Injury_Response_Richards2021", omit.zero = F, slot = which.slot)
+  featureScatter(object = so.mrd, feature.x = "Developmental_Richards2021", feature.y = "Injury_Response_Richards2021", omit.zero = F, slot = which.slot)
+  featureScatter(object = so.neftel, feature.x = "Developmental_Richards2021", feature.y = "Injury_Response_Richards2021", omit.zero = F, slot = which.slot)
+  featureScatter(object = so.hs.tumor, feature.x = "Developmental_Richards2021", feature.y = "Injury_Response_Richards2021", omit.zero = F, slot = which.slot)
+
+  colnames(df.vd.mrd)
+
+```
+  
+  
+  
+  
+  
+  
+```{r pathway-associated TFs, fig.width=7, fig.height=12}
+
+  membership2list <- function(membership){
+    
+    u.m <- unique(membership)
+    u.m <- u.m[order(u.m)]
+    
+    m.list <- list()
+    for (i in 1:length(u.m)){
+      m.list[[paste0("m", i)]] <- names(membership)[membership %in% u.m[i]]
+    }
+    
+    return(m.list)
+    
+  }
+  
+  varHM <- function(df.vd, top.n = 30, features = NULL, plt.title = NULL, plt.subtitle = NULL, rescale = F, 
+                    col.cut = NA, row.cut = NA, return.ggplot = T, scale.lim = NA, df.ann = NA, return.score = F){
+    df.vd.2 <- df.vd
+    df.vd.2 <- df.vd.2[complete.cases(df.vd.2), ]
+    try({
+      df.vd.2 <- df.vd.2 %>% dplyr::select(-c("Residuals"))
+    }, silent = T)
+    
+    
+    try({
+      df.vd.2 <- df.vd.2 %>% dplyr::select(-c("Im.v1_MRD", "Im.v2_MRD","Im.v3_MRD", "CT2A.score", "GL261.score"))
+    }, silent = T)
+
+    df.vd.2$max.score <- apply(df.vd.2, 1, function(x) max(abs(x), na.rm = T))
+    
+    df.gene.rank <- data.frame(gene = rownames(df.vd.2), max.score = df.vd.2$max.score, rank = rank(df.vd.2$max.score), rev.rank = rank(-df.vd.2$max.score), prank = rank(df.vd.2$max.score)/nrow(df.vd.2))
+    
+    if (rescale){
+      df.vd.2 <- as.data.frame(apply(df.vd.2, 2, rescaleValues))
+    }
+    
+    
+    df.vd.2 <- as.data.frame(apply(df.vd.2, 2, function(x) x/sd(x, na.rm = T)))
+    if (is.na(scale.lim)){
+      scale.lim <- max(abs(max(df.vd.2$max.score, na.rm = T)))
+    }
+    
+    df.vd.2 <- df.vd.2[ ,complete.cases(t(df.vd.2))]
+ 
+    if (return.score){
+      return(df.vd.2)
+    } else {
+      
+      if (!is.null(features)){
+        df.vd.2 <- as.matrix(df.vd.2 %>% dplyr::filter(rownames(df.vd.2) %in% features) %>% dplyr::select(-c("max.score")))
+      } else {
+        df.vd.2 <- as.matrix(df.vd.2 %>% dplyr::top_n(top.n, max.score) %>% dplyr::select(-c("max.score")))
+      }
+      
+    }
+    
+    df.vd.2[df.vd.2 > scale.lim] <- scale.lim
+    df.vd.2[df.vd.2 < -scale.lim] <- -scale.lim
+    my.breaks <- seq(-scale.lim, scale.lim, by = 2*scale.lim/100)
+    
+    if (return.ggplot){
+      plt.hm <- ggplotify::as.ggplot(pheatmap::pheatmap(df.vd.2, 
+                                                        cutree_cols = col.cut,
+                                                        cutree_rows = row.cut,
+                                                        
+                             border_color  = NA,
+                                                        breaks = my.breaks,
+                                                        color = colorRampPalette(rev(brewer.pal(n = 7, name = "RdBu")))(100),
+                                                        silent = T,
+                                                        annotation_row = df.ann)) + 
+        labs(title = plt.title, subtitle = plt.subtitle)
+    } else {
+      plt.hm <- (pheatmap::pheatmap(df.vd.2, 
+                                    cutree_cols = col.cut,
+                                    cutree_rows = row.cut,
+                                    breaks = my.breaks,
+                                    border_color  = NA,
+                                    color = colorRampPalette(rev(brewer.pal(n = 7, name = "RdBu")))(100),
+                                    silent = T,
+                                    annotation_row = df.ann))  
+    }
+    
+    return(plt.hm)
+  }
+  
+  show.n <- 75
+  
+  # visualize Im-associated TFs
+  n.cut <- 3
+  varHM(df.vd = df.si.ct2a, plt.title = "CT2A", plt.subtitle = "Signature States", top.n = show.n, col.cut = n.cut)
+  varHM(df.vd = df.si.gl261, plt.title = "GL261", plt.subtitle = "Signature States", top.n = show.n, col.cut = n.cut)
+  varHM(df.vd = df.si.pr, plt.title = "Human (PR)", plt.subtitle = "Signature States", top.n = show.n, col.cut = n.cut)
+  varHM(df.vd = df.si.mrd, plt.title = "MRD", plt.subtitle = "Signature States", top.n = show.n, col.cut = n.cut)
+  varHM(df.vd = df.si.neftel, plt.title = "Neftel 2019", plt.subtitle = "Signature States", top.n = show.n, col.cut = n.cut)
+  varHM(df.vd = df.si.richards, plt.title = "Richards 2021", plt.subtitle = "Signature States", top.n = show.n, col.cut = n.cut)
+    varHM(df.vd = df.si.yu, plt.title = "Yu 2018", plt.subtitle = "Signature States", top.n = show.n, col.cut = n.cut)
+  varHM(df.vd = df.si.abdel, plt.title = "Abdelfattah 2022", plt.subtitle = "Signature States", top.n = show.n, col.cut = n.cut)
+  varHM(df.vd = df.si.wang, plt.title = "Wang 2022", plt.subtitle = "Signature States", top.n = show.n, col.cut = n.cut)
+  
+  vd.list <- list(
+    pr = df.si.pr,
+    mrd = df.si.mrd,
+    neftel = df.si.neftel,
+    richards = df.si.richards,
+    yu = df.si.yu,
+    abdel = df.si.abdel,
+    wang = df.si.wang
+  )
+  sig.names <- names(df.vd.ct2a)
+  df.rank.mean.list <- list()
+  df.rank.z.list <- list()
+  df.rank.all <- list()
+  
+  same.sign.tf <- c()
+  
+  for (i in 1:length(sig.names)){
+    
+    if (sig.names[i] %in%  c("Im.v1_MRD", "Im.v2_MRD","Im.v3_MRD", "CT2A.score", "GL261.score", "Residuals")) next
+
+    sig.vd <- lapply(vd.list, function(x) {
+      y = x[ ,sig.names[i]]
+      names(y) <- firstup(rownames(x))
+      
+      
+      return(data.frame(gene =  names(y), vd = y))
+    })
+    
+    clip <- 10
+    do.scale <- T
+    if (do.scale){
+      for (j in 1:length(vd.list)){
+        sig.vd[[j]][ ,2] <- sig.vd[[j]][ ,2] / mad(sig.vd[[j]][ ,2], na.rm = T)
+        sig.vd[[j]][is.na(sig.vd[[j]][ ,2]) ,2] <- 0
+        sig.vd[[j]][sig.vd[[j]][ ,2] > clip ,2] <- clip
+        sig.vd[[j]][sig.vd[[j]][ ,2] < -clip ,2] <- -clip
+        colnames(sig.vd[[j]]) <- c("gene", names(vd.list)[j])
+      }    
+    } else {
+      for (j in 1:length(vd.list)){
+        colnames(sig.vd[[j]]) <- c("gene", names(vd.list)[j])
+      }    
+      
+    }
+    
+    sig.merge <- Reduce(function(x, y) merge(x, y, all=TRUE), sig.vd)
+    sig.merge <- col2rowname(sig.merge, "gene")
+    sig.rank <- sig.merge
+    
+    df.rank <- data.frame(gene = rownames(sig.rank),
+                          x.mean = apply(sig.rank, 1, mean, na.rm = T),
+                          x.sd = apply(sig.rank, 1, sd, na.rm = T),
+                          z = apply(sig.rank, 1, mean, na.rm = T) / apply(sig.rank, 1, sd, na.rm = T),
+                          cv = abs(apply(sig.rank, 1, sd, na.rm = T)/apply(sig.rank, 1, mean, na.rm = T)),
+                          same.sign = apply(sig.rank, 1, function(x) abs(sum(sign(x))) == length(x)),
+                          thresh.pos0.1 = apply(sig.rank, 1, function(x) all(x > 0.1)),
+                          thresh.pos0.5 = apply(sig.rank, 1, function(x) all(x > 0.5)),
+                          thresh.pos0.75 = apply(sig.rank, 1, function(x) all(x > 0.75)),
+                          thresh.pos1 = apply(sig.rank, 1, function(x) all(x > 1)),
+                          thresh.neg0.1 = apply(sig.rank, 1, function(x) all(x < -0.1)),
+                          thresh.neg0.5 = apply(sig.rank, 1, function(x) all(x < -0.5)),
+                          thresh.neg0.75 = apply(sig.rank, 1, function(x) all(x < -0.75)),
+                          thresh.neg1 = apply(sig.rank, 1, function(x) all(x < -1)),
+                          n.available = apply(sig.rank, 1, function(x) sum(!is.na(x))))
+    
+    df.rank <- df.rank %>% dplyr::filter(df.rank$n.available == length(vd.list))
+    same.sign.tf <- c(same.sign.tf, df.rank$gene[df.rank$thresh.pos0.1 | df.rank$thresh.neg0.1])
+    df.rank.mean.list[[sig.names[i]]] <- df.rank[ ,c("gene", "x.mean")]
+    colnames(df.rank.mean.list[[sig.names[i]]]) <- c("gene", sig.names[i])
+    
+    df.rank.z.list[[sig.names[i]]] <- df.rank[ ,c("gene", "z")]
+    colnames(df.rank.z.list[[sig.names[i]]]) <- c("gene", sig.names[i])
+    
+    df.rank.all[[sig.names[[i]]]] <- df.rank
+    
+  }
+  
+  tf.rank.mean <- Reduce(function(x, y) merge(x, y, all=TRUE), df.rank.mean.list)
+  tf.rank.mean <- col2rowname(tf.rank.mean, "gene")
+  
+  same.sign.tf <- unique(same.sign.tf)
+  same.sign.tf <- same.sign.tf[!is.na(same.sign.tf)]
+  tf.rank.mean <- tf.rank.mean[rownames(tf.rank.mean) %in% same.sign.tf, ]
+  
+  tf.rank.mean2 <- tf.rank.mean
+  try({tf.rank.mean2 <- tf.rank.mean2 %>% dplyr::select(-c("Im.v1_MRD", "Im.v2_MRD","Im.v3_MRD", "CT2A.score", "GL261.score"))}, silent = T)
+  try({tf.rank.mean2 <- tf.rank.mean2 %>% dplyr::select(-c("Residuals"))}, silent = T)
+  tf.rank.mean2$max.score <- apply(tf.rank.mean2, 1, function(x) max(abs(x)))
+  df.gene.rank <- data.frame(gene = rownames(tf.rank.mean2), 
+                             max.score = tf.rank.mean2$max.score, 
+                             rank = rank(tf.rank.mean2$max.score), 
+                             rev.rank = rank(-tf.rank.mean2$max.score), 
+                             prank = rank(tf.rank.mean2$max.score)/nrow(tf.rank.mean2))
+  
+  n <- sum(df.gene.rank$max.score > 10)
+
+  # stringent network #############################
+  consensus.row.cut <-4
+  consensus.top.n <- 15
+  consensus.winsor <- 5
+  
+  plt.consensus.hm.stringent <- varHM(tf.rank.mean, plt.title = "Stringent TF-state Network", 
+                                      plt.subtitle = "Signature States", top.n = consensus.top.n, col.cut = n.cut, row.cut = consensus.row.cut,
+                                      return.ggplot = F, scale.lim = consensus.winsor)
+  
+  consensus.membership.stringent <- cutree(plt.consensus.hm.stringent$tree_row, consensus.row.cut)
+  cg.list.stringent <- membership2list(consensus.membership.stringent)
+  
+  df.cg.stringent <- namedList2longDF(cg.list.stringent)
+  df.cg.stringent <- col2rowname(df.cg.stringent, "value"); colnames(df.cg.stringent) <- "cluster"
+  
+  plt.hm.tf.stringent <- varHM(tf.rank.mean, plt.title ="Stringent TF-state Network", 
+                               plt.subtitle = "Signature States", top.n = consensus.top.n, col.cut = 4, 
+                               row.cut = consensus.row.cut,
+                               return.ggplot = T, scale.lim = consensus.winsor, df.ann = df.cg.stringent)
+  
+  plt.hm.tf.stringent
+  
+  # lenient network ############################
+  consensus.row.cut <- 3
+  consensus.top.n <- 70
+  consensus.winsor <- 5
+  
+  plt.consensus.hm.lenient <- varHM(tf.rank.mean, plt.title = "Lenient TF-state Network", 
+                                    plt.subtitle = "Signature States", top.n = consensus.top.n, col.cut = 3, row.cut = consensus.row.cut,
+                                    return.ggplot = F, scale.lim = consensus.winsor)
+  
+  consensus.membership.lenient <- cutree(plt.consensus.hm.lenient$tree_row, consensus.row.cut)
+  cg.list.lenient <- membership2list(consensus.membership.lenient)
+  
+  consensus.membership.col <- cutree(plt.consensus.hm.lenient$tree_col, 3)
+  cg.list.col <- membership2list(consensus.membership.col)
+  
+  
+  df.cg.row <- namedList2longDF(cg.list.col)
+  df.cg.row <- col2rowname(df.cg.row, "value"); colnames(df.cg.row) <- "cluster"
+  
+  df.cg.lenient <- namedList2longDF(cg.list.lenient)
+  df.cg.lenient <- col2rowname(df.cg.lenient, "value"); colnames(df.cg.lenient) <- "cluster"
+  
+  
+  tf.lenient.scores <- varHM(tf.rank.mean, plt.title = "Lenient TF-state Network", 
+                             plt.subtitle = "Signature States", top.n = consensus.top.n, col.cut = 3, 
+                             row.cut = consensus.row.cut,
+                             return.ggplot = T, scale.lim = consensus.winsor, df.ann = df.cg.lenient, return.score = T)
+  
+  plt.hm.tf.lenient <- varHM(tf.rank.mean, plt.title = "Lenient TF-state Network", 
+                             plt.subtitle = "Signature States", top.n = consensus.top.n, col.cut = 3, 
+                             row.cut = consensus.row.cut,
+                             return.ggplot = T, scale.lim = consensus.winsor, df.ann = df.cg.lenient)
+
+  # plt.consensus.hm.lenient
+  plt.hm.tf.lenient
+  
+  plt.hm.tf.lenient2
+ 
+```
+  
+```{r FINAL TF selection }
+
+tf.lenient.scores.top <- tf.lenient.scores %>% dplyr::filter(rownames(tf.lenient.scores) %in% unique(unlist(cg.list.lenient)))  %>% dplyr::select(-c("max.score"))
+
+m1col <-  Matrix::rowMeans(tf.lenient.scores[, colnames(tf.lenient.scores) %in% cg.list.col$m1])
+m2col <-  Matrix::rowMeans(tf.lenient.scores[, colnames(tf.lenient.scores) %in% cg.list.col$m2])
+m3col <-  Matrix::rowMeans(tf.lenient.scores[, colnames(tf.lenient.scores) %in% cg.list.col$m3])
+
+df.score.group.agg <- bind_cols(m1col, m2col, m3col)
+rownames(df.score.group.agg) <- rownames(tf.lenient.scores)
+colnames(df.score.group.agg) <- c("p1", "p2", "p3")
+df.score.group.agg$max.score <- apply(df.score.group.agg, 1, max)
+
+m1 <-  Matrix::colMeans(tf.lenient.scores.top[rownames(tf.lenient.scores.top) %in% cg.list.lenient$m1, ])
+m2 <-  Matrix::colMeans(tf.lenient.scores.top[rownames(tf.lenient.scores.top) %in% cg.list.lenient$m2, ])
+m3 <-  Matrix::colMeans(tf.lenient.scores.top[rownames(tf.lenient.scores.top) %in% cg.list.lenient$m3, ])
+
+df.score.agg <- bind_rows(m1, m2, m3)
+rownames(df.score.agg) <- c("m1", "m2", "m3")
+
+score.cor <- as.data.frame(t(cor(t(df.score.agg), t(tf.lenient.scores %>% dplyr::select(-c("max.score"))))))
+df.cor.activity <- bind_cols(df.score.group.agg, score.cor)
+df.cor.activity <- as.data.frame(df.cor.activity)
+rownames(df.cor.activity) <- rownames(score.cor)
+
+df.cor.activity$pval <- z2p(df.cor.activity$max.score)
+df.cor.activity$fdr <- p.adjust(df.cor.activity$pval, method = "BH")
+df.cor.activity$state <- df.cor.activity$fdr < 0.2
+
+plt.cor.activity <-df.cor.activity %>%
+  dplyr::arrange(max.score) %>%
+  ggplot(aes(x = m1, y = m3, fill = m2, color = fdr < 0.2, size = max.score)) + 
+  geom_point(pch = 21) + 
+  labs(x = "Mesenchymal", y = "Developmental", fill = "Cycling", color = "Significant") + 
+  theme_miko(legend = T) + 
+  geom_hline(yintercept = 0, linetype = "dashed") + 
+  geom_vline(xintercept = 0, linetype = "dashed") + 
+  scale_fill_miko() + 
+  scale_color_manual(values = c("TRUE" = "black", "FALSE" = "grey")) + 
+  scale_size(range = c(0.1, 6)) +
+  labs(title = "Phenotypic Transcription Factor Relationships", subtitle = "Phenotype Correlations")
+
+print(plt.cor.activity)
+
+ df.cor.activity %>%
+  ggplot(aes(x = max.score)) + 
+  geom_histogram() + 
+  facet_wrap(~state)
+# savePDF("Reboot11_phenotypic_correlations_131223.pdf", plt.cor.activity, fig.height = 6, fig.width = 7)
+
+
+# Final HM iteration ###############################################
+    plt.consensus.hm.lenient <- varHM(tf.rank.mean, features = rownames(df.cor.activity)[df.cor.activity$state], plt.title = "Lenient TF-state Network", 
+                                    plt.subtitle = "Signature States", top.n = consensus.top.n, col.cut = 3, row.cut = consensus.row.cut,
+                                    return.ggplot = F, scale.lim = consensus.winsor)
+  
+  consensus.membership.lenient <- cutree(plt.consensus.hm.lenient$tree_row, consensus.row.cut)
+  cg.list.lenient <- membership2list(consensus.membership.lenient)
+  
+  consensus.membership.col <- cutree(plt.consensus.hm.lenient$tree_col, 3)
+  cg.list.col <- membership2list(consensus.membership.col)
+  
+  
+  df.cg.row <- namedList2longDF(cg.list.col)
+  df.cg.row <- col2rowname(df.cg.row, "value"); colnames(df.cg.lenient) <- "cluster"
+  
+  df.cg.lenient <- namedList2longDF(cg.list.lenient)
+  df.cg.lenient <- col2rowname(df.cg.lenient, "value"); colnames(df.cg.lenient) <- "cluster"
+  
+  
+  tf.lenient.scores <- varHM(tf.rank.mean, features = rownames(df.cor.activity)[df.cor.activity$state], plt.title = "Lenient TF-state Network", 
+                             plt.subtitle = "Signature States", top.n = consensus.top.n, col.cut = 3, 
+                             row.cut = consensus.row.cut,
+                             return.ggplot = T, scale.lim = consensus.winsor, df.ann = df.cg.lenient, return.score = T)
+  
+  plt.hm.tf.lenient <- varHM(tf.rank.mean, features = rownames(df.cor.activity)[df.cor.activity$state], plt.title = "Lenient TF-state Network", 
+                             plt.subtitle = "Signature States", top.n = consensus.top.n, col.cut = 3, 
+                             row.cut = consensus.row.cut,
+                             return.ggplot = T, scale.lim = consensus.winsor, df.ann = df.cg.lenient)
+  
+  plt.hm.tf.lenient
+  
+  
+  final.tf <- rownames(df.cor.activity)[df.cor.activity$state]
+  
+    tf.list.final <- list(
+    m1 = cg.list.lenient$m1[cg.list.lenient$m1 %in% final.tf],
+    m2= cg.list.lenient$m2[cg.list.lenient$m2 %in% final.tf],
+    m3 = cg.list.lenient$m3[cg.list.lenient$m3 %in% final.tf]
+  )
+  
+  # tf.list.final <- list(
+  #   TF1_mesenchymal = cg.list.lenient$m1[cg.list.lenient$m1 %in% final.tf],
+  #   TF2_cycling = cg.list.lenient$m2[cg.list.lenient$m2 %in% final.tf],
+  #   TF3_developmental = cg.list.lenient$m3[cg.list.lenient$m3 %in% final.tf]
+  # )
+  
+  # saveRDS(tf.list.final, "REBOOT11_PHENOTYPIC_TFs_131223.rds")
+    # saveRDS(master.set, "REBOOT11_PHENOTYPIC_GENES_131223.rds") 
+    # master.set
+  
+```
+  
+  
+```{r  fig.width=8, fig.height=12}
+
+plt.hm.tf.lenient
+# savePDF("TF_hm_20FDR_150523.pdf",plt.hm.tf.lenient,  fig.width=8, fig.height=12)
+```
+  
+```{r TF motif enrichment}
+
+library(RcisTarget)
+motifRankings <- importRankings("C:/Users/Owner/Documents/scPipeline/M31_cisTarget_databases/mm9-tss-centered-10kb-7species.mc9nr.feather")
+
+
+ data(motifAnnotations_mgi)
+  motifAnnotations_mgi <- motifAnnotations
+  master.set_notf <- master.set[grepl("notf", names(master.set))]
+
+  motifEnrichmentTable_wGenes <- cisTarget(master.set_notf[!grepl("Dev|Inj", names(master.set_notf))], 
+         motifRankings,
+         motifAnnot=motifAnnotations_mgi,
+         nesThreshold = 0,
+         highlightTFs = unique(unlist(tf.list.final)))
+  
+  # write.csv(motifEnrichmentTable_wGenes, file = "phenotype_geneset_motif_enrichment_141223.csv")
+  
+```
+  
+  
+  
+```{r fig.width=7, fig.height=12}
+
+scaleSI <- function(x, clip.val = 10){
+      clip <- clip.val
+
+      x <- apply(x, 2, function(y) y / mad(y, na.rm = T))
+                  x[is.na(x)] <- 0
+      x[x > clip] <- clip
+      x[x < -clip] <- -clip
+
+        return(as.data.frame((x)))
+    }
+
+  varHM(df.vd =  scaleSI(df.si.ct2a),features = rownames(df.cor.activity)[df.cor.activity$state], 
+        plt.title = "CT2A", plt.subtitle = "Signature States", top.n = show.n, col.cut = n.cut)
+  varHM(df.vd = df.si.gl261, plt.title = "GL261", plt.subtitle = "Signature States", top.n = show.n, col.cut = n.cut)
+  varHM(df.vd = df.si.pr, plt.title = "Human (PR)", plt.subtitle = "Signature States", top.n = show.n, col.cut = n.cut)
+  varHM(df.vd = df.si.mrd, plt.title = "MRD", plt.subtitle = "Signature States", top.n = show.n, col.cut = n.cut)
+  varHM(df.vd = df.si.neftel, plt.title = "Neftel 2019", plt.subtitle = "Signature States", top.n = show.n, col.cut = n.cut)
+  varHM(df.vd = df.si.richards, plt.title = "Richards 2021", plt.subtitle = "Signature States", top.n = show.n, col.cut = n.cut)
+    varHM(df.vd = df.si.yu, plt.title = "Yu 2018", plt.subtitle = "Signature States", top.n = show.n, col.cut = n.cut)
+  varHM(df.vd = df.si.abdel, plt.title = "Abdelfattah 2022", plt.subtitle = "Signature States", top.n = show.n, col.cut = n.cut)
+  varHM(df.vd = df.si.wang, plt.title = "Wang 2022", plt.subtitle = "Signature States", top.n = show.n, col.cut = n.cut)
+  
+```
+  
+```{r, fig.width=20, fig.height=5}
+scoreAgg <- function(x, clip.val = 10){
+  
+  x <- scaleSI(x, clip.val)
+  x$p1 <- Matrix::rowMeans(x[, colnames(x) %in% cg.list.col$m1])
+  x$p2 <- Matrix::rowMeans(x[, colnames(x) %in% cg.list.col$m2])
+  x$p3 <- Matrix::rowMeans(x[, colnames(x) %in% cg.list.col$m3])
+  
+  return(x)
+}
+
+df.si.neftel_v2 <- scoreAgg(df.si.neftel)
+df.si.mrd_v2 <- scoreAgg(df.si.mrd)
+df.si.pr_v2 <- scoreAgg(df.si.pr)
+df.si.gl261_v2 <- scoreAgg(df.si.gl261)
+df.si.ct2a_v2 <- scoreAgg(df.si.ct2a)
+df.si.richards_v2 <- scoreAgg(df.si.richards)
+df.si.yu_v2 <- scoreAgg(df.si.yu)
+df.si.abdel_v2 <- scoreAgg(df.si.abdel)
+df.si.wang_v2 <- scoreAgg(df.si.wang)
+
+rankedImportance(which.field = "p1", 
+                 highlight.genes = toupper(tf.list.final$m2),  
+                 df.n = df.si.neftel_v2, df.m = df.si.mrd_v2, df.p = df.si.pr_v2, df.g = df.si.gl261_v2, df.c = df.si.ct2a_v2, df.r = df.si.richards_v2, df.y = df.si.yu_v2, df.a = df.si.abdel_v2, df.w = df.si.wang_v2)
+
+
+rankedImportance(which.field = "p2", 
+                 highlight.genes = toupper(tf.list.final$m1),  
+                 df.n = df.si.neftel_v2, df.m = df.si.mrd_v2, df.p = df.si.pr_v2, df.g = df.si.gl261_v2, df.c = df.si.ct2a_v2, df.r = df.si.richards_v2, df.y = df.si.yu_v2, df.a = df.si.abdel_v2, df.w = df.si.wang_v2)
+
+
+rankedImportance(which.field = "p3", 
+                 highlight.genes = toupper(tf.list.final$m3),  
+                 df.n = df.si.neftel_v2, df.m = df.si.mrd_v2, df.p = df.si.pr_v2, df.g = df.si.gl261_v2, df.c = df.si.ct2a_v2, df.r = df.si.richards_v2, df.y = df.si.yu_v2, df.a = df.si.abdel_v2, df.w = df.si.wang_v2)
+
+
+```
+  
+  
+```{r percentile scores, fig.width=9, fig.height=9}
+
+addCol <- function(x, set.name = ""){
+  x$gene <- rownames(x)
+  x$set <- set.name
+  return(x)
+}
+
+gs <- toupper(tf.list.final$m2)
+which.score <- "p1"
+
+prankSum <- function( which.score, gs, df.n = df.si.neftel_v2, df.m = df.si.mrd_v2, df.p = df.si.pr_v2, df.g = df.si.gl261_v2, df.c = df.si.ct2a_v2, df.r = df.si.richards_v2, df.y = df.si.yu_v2, df.a = df.si.abdel_v2, df.w = df.si.wang_v2){
+
+  df.all <- bind_rows(addCol(df.n, "Neftel 2019"), addCol(df.m, "Qazi 2022"), addCol(df.p, "Mikolajewicz 2023"), addCol(df.g, "GL261"), addCol(df.c, "CT2A"), addCol(df.r, "Richards 2021"), addCol(df.y, "Yu 2018"), addCol(df.a, "Abdelfattah 2021"), addCol(df.w, "Wang 2022"))
+df.all$tf <- toupper(df.all$gene) %in% toupper(gs)
+
+df.all$score <- df.all[, which.score]
+
+df.all.top <- df.all %>% 
+  dplyr::group_by(set) %>%
+  dplyr::mutate(prank = rank(score)/length(score)) %>%
+  dplyr::filter(tf) 
+
+
+df.all.top.sum <- df.all.top%>% dplyr::group_by(set) %>%
+  dplyr::summarise(prank.median = mean(prank)) %>% dplyr::arrange(-prank.median)
+
+df.all.top$group <- "other"
+df.all.top$group[df.all.top$set %in% "CT2A"] <- "CT2A"
+df.all.top$group[df.all.top$set %in% "GL261"] <- "GL261"
+
+df.all.top %>%
+  dplyr::mutate(set = factor(set, levels = df.all.top.sum$set)) %>%
+  dplyr::arrange(prank) %>%
+  ggplot(aes(x = set, y = prank, fill = group)) + 
+  geom_boxplot() + 
+  theme_miko(x.axis.rotation = 45) + 
+  scale_fill_manual(values = c("other" = "grey", "CT2A" = ct2a.color, "GL261" = gl261.color)) + 
+  labs(y = "TF Rank")
+
+  
+}
+
+p1.m1 <- prankSum( which.score = "p1", gs = tf.list.final$m1, df.n = df.si.neftel_v2, df.m = df.si.mrd_v2, df.p = df.si.pr_v2, df.g = df.si.gl261_v2, df.c = df.si.ct2a_v2, df.r = df.si.richards_v2, df.y = df.si.yu_v2, df.a = df.si.abdel_v2, df.w = df.si.wang_v2)
+ 
+p2.m1 <- prankSum( which.score = "p2", gs = tf.list.final$m1, df.n = df.si.neftel_v2, df.m = df.si.mrd_v2, df.p = df.si.pr_v2, df.g = df.si.gl261_v2, df.c = df.si.ct2a_v2, df.r = df.si.richards_v2, df.y = df.si.yu_v2, df.a = df.si.abdel_v2, df.w = df.si.wang_v2)
+  
+p3.m1 <- prankSum( which.score = "p3", gs = tf.list.final$m1, df.n = df.si.neftel_v2, df.m = df.si.mrd_v2, df.p = df.si.pr_v2, df.g = df.si.gl261_v2, df.c = df.si.ct2a_v2, df.r = df.si.richards_v2, df.y = df.si.yu_v2, df.a = df.si.abdel_v2, df.w = df.si.wang_v2)
+
+p1.m2 <- prankSum( which.score = "p1", gs = tf.list.final$m2, df.n = df.si.neftel_v2, df.m = df.si.mrd_v2, df.p = df.si.pr_v2, df.g = df.si.gl261_v2, df.c = df.si.ct2a_v2, df.r = df.si.richards_v2, df.y = df.si.yu_v2, df.a = df.si.abdel_v2, df.w = df.si.wang_v2)
+ 
+p2.m2 <- prankSum( which.score = "p2", gs = tf.list.final$m2, df.n = df.si.neftel_v2, df.m = df.si.mrd_v2, df.p = df.si.pr_v2, df.g = df.si.gl261_v2, df.c = df.si.ct2a_v2, df.r = df.si.richards_v2, df.y = df.si.yu_v2, df.a = df.si.abdel_v2, df.w = df.si.wang_v2)
+  
+p3.m2 <- prankSum( which.score = "p3", gs = tf.list.final$m2, df.n = df.si.neftel_v2, df.m = df.si.mrd_v2, df.p = df.si.pr_v2, df.g = df.si.gl261_v2, df.c = df.si.ct2a_v2, df.r = df.si.richards_v2, df.y = df.si.yu_v2, df.a = df.si.abdel_v2, df.w = df.si.wang_v2)
+
+p1.m3 <- prankSum( which.score = "p1", gs = tf.list.final$m3, df.n = df.si.neftel_v2, df.m = df.si.mrd_v2, df.p = df.si.pr_v2, df.g = df.si.gl261_v2, df.c = df.si.ct2a_v2, df.r = df.si.richards_v2, df.y = df.si.yu_v2, df.a = df.si.abdel_v2, df.w = df.si.wang_v2)
+ 
+p2.m3 <- prankSum( which.score = "p2", gs = tf.list.final$m3, df.n = df.si.neftel_v2, df.m = df.si.mrd_v2, df.p = df.si.pr_v2, df.g = df.si.gl261_v2, df.c = df.si.ct2a_v2, df.r = df.si.richards_v2, df.y = df.si.yu_v2, df.a = df.si.abdel_v2, df.w = df.si.wang_v2)
+  
+p3.m3 <- prankSum( which.score = "p3", gs = tf.list.final$m3, df.n = df.si.neftel_v2, df.m = df.si.mrd_v2, df.p = df.si.pr_v2, df.g = df.si.gl261_v2, df.c = df.si.ct2a_v2, df.r = df.si.richards_v2, df.y = df.si.yu_v2, df.a = df.si.abdel_v2, df.w = df.si.wang_v2)
+
+
+plt.ranks <- cowplot::plot_grid(
+  cowplot::plot_grid(p1.m2 + labs(title = "Mes", y = "Mes TF Rank", x = NULL), 
+                     p2.m2 + labs(title = "Dev", y = "", x = NULL), 
+                     p3.m2 + labs(title = "Cycle", y = "", x = NULL), nrow = 1),
+cowplot::plot_grid(p1.m1 + labs(title = "", y = "Dev TF Rank", x = NULL), 
+                   p2.m1 + labs(title = "", y = "", x = NULL), 
+                   p3.m1 + labs(title = "", y = "", x = NULL), nrow = 1),
+cowplot::plot_grid(p1.m3+ labs(title = "", y = "Cycle TF Rank", x = NULL), 
+                   p2.m3 + labs(title = "", y = "", x = NULL), 
+                   p3.m3 + labs(title = "", y = "", x = NULL), nrow = 1),
+nrow = 3
+)
+# savePDF("TF_rank_panel_150523.pdf", plt.ranks, fig.width=9, fig.height=9)
+
+```
+
+```{r}
+plt.ranks
+```
+
+  
+```{r annotate modules}
+
+  hg.tf.res <- runHG(  gene.list = cg.list.stringent,
+                       gene.universe =  unique(unlist(lapply(lapply(vd.list, rownames), firstup))) ,
+                       species = "Mm" )
+  
+  
+  summarizeHG(hg.tf.res)$plots
+
+```
+  
+  
+```{r score TF modules}
+
+  wq <- c(0, 1)
+
+  so.cg.ct2a.ms <- runMS(object = so.ct2a.clean, genelist = cg.list.lenient, rescale = T, winsorize.quantiles = wq, search = T)
+  so.cg.gl261.ms <- runMS(object = so.gl261.clean, genelist = cg.list.lenient, rescale = T, winsorize.quantiles = wq, search = T)
+
+  cor.threshold <- 0.15
+  df.gl261.tf.module <- so.cg.gl261.ms$data
+  df.gl261.tf.module <- df.gl261.tf.module[ ,colnames(df.gl261.tf.module) %in% names(cg.list.lenient)]
+  expr.mat <- so.gl261.clean@assays$SCT@data
+  expr.mat <- expr.mat[rownames(expr.mat) %in% unique(unlist(cg.list.lenient)), ]
+  sig.mat <- as.matrix(df.gl261.tf.module)
+  expr.mat <- as.matrix(t(expr.mat))
+  sig.expr.cor <- t(cor(sig.mat, expr.mat, method = "spearman"))
+  sig.expr.gl261 <- apply(sig.expr.cor, 2, function(x) rownames(sig.expr.cor)[x > cor.threshold])
+  for (i in 1:length(sig.expr.gl261)){
+    sig.expr.gl261[[names(sig.expr.gl261)[i]]] <- sig.expr.gl261[[names(sig.expr.gl261)[i]]][sig.expr.gl261[[names(sig.expr.gl261)[i]]] %in% cg.list.lenient[[names(sig.expr.gl261)[i]]]]
+  }
+  
+  df.ct2a.tf.module <- so.cg.ct2a.ms$data
+  df.ct2a.tf.module <- df.ct2a.tf.module[ ,colnames(df.ct2a.tf.module) %in% names(cg.list.lenient)]
+  expr.mat <- so.ct2a.clean@assays$SCT@data
+  expr.mat <- expr.mat[rownames(expr.mat) %in% unique(unlist(cg.list.lenient)), ]
+  sig.mat <- as.matrix(df.ct2a.tf.module)
+  expr.mat <- as.matrix(t(expr.mat))
+  sig.expr.cor <- t(cor(sig.mat, expr.mat, method = "spearman"))
+  sig.expr.ct2a <- apply(sig.expr.cor, 2, function(x) rownames(sig.expr.cor)[x > cor.threshold])
+  for (i in 1:length(sig.expr.ct2a)){
+    sig.expr.ct2a[[names(sig.expr.ct2a)[i]]] <- sig.expr.ct2a[[names(sig.expr.ct2a)[i]]][sig.expr.ct2a[[names(sig.expr.ct2a)[i]]] %in% cg.list.lenient[[names(sig.expr.ct2a)[i]]]]
+  }
+
+  # sig.expr.ct2a
+  wq <- c(0.025, 0.975)
+  so.cg.ct2a.ms2 <- runMS(object = so.ct2a.clean, genelist = sig.expr.ct2a, rescale = F, winsorize.quantiles = wq, search = T)
+  so.cg.gl261.ms2 <- runMS(object = so.gl261.clean, genelist = sig.expr.gl261, rescale = F, winsorize.quantiles = wq, search = T)
+  
+  
+  so.cg.ct2a.auc2 <- runAUC(object = so.ct2a.clean, genelist = sig.expr.ct2a)
+  so.cg.gl261.auc2 <- runAUC(object = so.gl261.clean, genelist = sig.expr.gl261)
+
+  sig.expr.ct2a
+  sig.expr.gl261
+```
+  
+
+  
+```{r graphing TF x phenotype relations, fig.width=8, fig.height=8}
+  
+  
+  library(igraph)
+  
+  # lenient network ###############################################################
+ tf.dat = tf.rank.mean[rownames(tf.rank.mean) %in% final.tf, ]
+# input: tf.dat (data.frame, row = prey, columns = bait, entries = intensities)
+  net <-  as.matrix(tf.dat)
+  
+  # filter values (anything filtered out will not appear as edge)
+  connectivity.threshold <- 3 # 
+  net[net < connectivity.threshold] <- 0
+  
+ # routine workflow
+  node.weight <- apply(net, 1, sum)
+  net.graph <- graph.incidence(net, mode=c('all') , weighted = T, multiple = T)
+  
+  # color code node type
+  sig.nodes <- which(names(V(net.graph)) %in% colnames(net))
+  gene.nodes <- which(names(V(net.graph)) %in% rownames(net))
+  V(net.graph)$color[sig.nodes] <- adjustcolor("tomato", 0.5)
+  V(net.graph)$color[gene.nodes] <- adjustcolor("skyblue", 0.5)
+  
+  node.alpha = 0.5
+  V(net.graph)$label.color[sig.nodes] <- adjustcolor("black", 1)
+  V(net.graph)$label.color[gene.nodes] <- adjustcolor("black", node.alpha)
+  
+  E(net.graph)$color <- adjustcolor("grey", 0.2)
+
+  label.size <- 0.5
+  V(net.graph)$label.cex[sig.nodes] <- label.size
+  V(net.graph)$label.cex[gene.nodes] <- label.size
+  
+  V(net.graph)$size[sig.nodes] <- 5
+  V(net.graph)$size[gene.nodes] <- rescaleValues(node.weight, 1, 5) 
+  V(net.graph)$frame.color <- NA
+  
+  # remove isolated nodes
+  Isolated = which(igraph::degree(net.graph)==0)
+  net.graph = igraph::delete.vertices(net.graph, Isolated)
+  net.graph$layout = igraph::layout.auto(net.graph) 
+
+  plt.net.gg.lenient <- cowplot::plot_grid(ggplotify::base2grob(~plot(net.graph)))
+  plt.net.gg.lenient
+  
+  
+  # savePDF("Reboot11_TF_net_150523.pdf",plt.net.gg.lenient,  fig.width=10, fig.height=8)
+
+  
+```
+  
+  
