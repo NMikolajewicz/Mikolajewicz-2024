@@ -26,7 +26,7 @@ R scripts are provided as Rmarkdown files and are intended to be run in order ch
 
 ## Demo
 
-The `DEMO_NC7_immune_coculture_screens.Rmd` file has been prepared to demo the utility of the R scripts. Once R and all dependencies have been installed, users may run the script and should expect to reproduce the gene-rank plots presented in Figure 7B. The run time for this script is less than 1 minute.
+The `DEMO_NC7_immune_coculture_screens.Rmd` file has been prepared to demo the utility of the R scripts. Once R and all dependencies have been installed, users may run the script and should expect to reproduce the gene-rank plots presented in Figure 7B. The data used in this analysis is compressed in the `DEMO_MUS_screens.zip` file and should be uncompressed prior to running the analysis. The run time for this script is less than 1 minute.
 
 ## System Requirements
 
