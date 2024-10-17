@@ -1,7 +1,7 @@
 # README
 
 ## Citation
-Mikolajewicz, N., Tatari N., Wei J., Savage N., Granda-Farias A., Dimitrov V., Chen D., Zador Z., Dasgupta K., Aguilera-Uribe M., Xiao Y., Yong-Lee S., McKenna D., Venugopal C., Brown K., Han H., Singh S., Moffat J. (2024). Multi-level functional analysis of murine glioma models yields genetic insights into cellular heterogeneity and immune evasion. in review. 
+Mikolajewicz, N., Tatari N., Wei J., Savage N., Granda-Farias A., Dimitrov V., Chen D., Zador Z., Dasgupta K., Aguilera-Uribe M., Xiao Y., Yong-Lee S., McKenna D., Venugopal C., Brown K., Han H., Singh S., Moffat J. (2024). Functional profiling of murine glioma models highlights targetable immune evasion phenotypes. in review. 
 
 ## Scripts
 
